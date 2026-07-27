@@ -1,7 +1,7 @@
 .PHONY: build test lint fmt check install clean
 
 build:
-	go build -o workspacectl .
+	go build -o herdr-pick .
 
 test:
 	go test ./...
@@ -18,4 +18,4 @@ install:
 	go install .
 
 clean:
-	rm -f workspacectl
+	rm -f herdr-pick

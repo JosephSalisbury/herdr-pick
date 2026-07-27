@@ -1,4 +1,4 @@
-module github.com/JosephSalisbury/workspacectl
+module github.com/JosephSalisbury/herdr-pick
 
 go 1.23
 

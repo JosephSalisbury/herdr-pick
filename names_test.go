@@ -26,3 +26,31 @@ func TestGenerateNameVariety(t *testing.T) {
 		t.Fatalf("expected at least 50 unique names from 100 calls, got %d", len(seen))
 	}
 }
+
+// Every generated name must survive the same validation a typed name faces,
+// since both become a branch and a directory.
+func TestGenerateNameIsAlwaysValid(t *testing.T) {
+	for range 200 {
+		name := GenerateName()
+		if err := ValidateBranchName(name); err != nil {
+			t.Fatalf("generated name %q is invalid: %v", name, err)
+		}
+	}
+}
+
+func TestValidateBranchNameAccepts(t *testing.T) {
+	for _, name := range []string{"swift-owlbear", "fix_thing", "v1.2.3", "abc123", "a"} {
+		if err := ValidateBranchName(name); err != nil {
+			t.Fatalf("%q: unexpected error: %v", name, err)
+		}
+	}
+}
+
+func TestValidateBranchNameRejects(t *testing.T) {
+	// Slashes are rejected so a branch is always exactly one path segment.
+	for _, name := range []string{"", "feature/thing", "has space", "-leading", ".hidden", "a..b", "semi;colon", "quote'd", "../escape"} {
+		if err := ValidateBranchName(name); err == nil {
+			t.Fatalf("expected error for %q", name)
+		}
+	}
+}

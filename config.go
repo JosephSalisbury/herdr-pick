@@ -1,66 +1,170 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
-// WindowConfig defines a window in a tmux layout.
-type WindowConfig struct {
-	Name    string `yaml:"name"`
-	Command string `yaml:"command"`
-}
+const (
+	defaultRoot     = "~/.local/share/herdr-pick"
+	defaultCacheTTL = "6h"
+	defaultAgent    = "claude"
+)
 
-// Config holds the workspacectl configuration.
+// Config holds herdr-pick configuration.
 type Config struct {
-	Layouts map[string][]WindowConfig `yaml:"layouts"`
+	Orgs     []string `yaml:"orgs"`
+	Root     string   `yaml:"root"`
+	CacheTTL string   `yaml:"cache_ttl"`
+	Agent    []string `yaml:"agent"`
+
+	// IncludeArchived pulls archived repositories into the picker. Off by
+	// default: archived repos are the majority of some orgs and are rarely
+	// what you want to start work on.
+	IncludeArchived bool `yaml:"include_archived"`
 }
 
-var defaultConfig = Config{
-	Layouts: map[string][]WindowConfig{
-		"worktree": {
-			{Name: "claude", Command: "claude"},
-			{Name: "diff", Command: "watch -n 5 git diff"},
-		},
-		"temporary": {
-			{Name: "claude", Command: "claude"},
-		},
-	},
+// DefaultConfig returns the configuration used when no config file exists.
+func DefaultConfig() Config {
+	return Config{
+		Root:     defaultRoot,
+		CacheTTL: defaultCacheTTL,
+		Agent:    []string{defaultAgent},
+	}
 }
 
-// LoadConfig reads a config file from disk.
+// configHome returns the XDG-style config directory.
+//
+// Deliberately not os.UserConfigDir: on macOS that yields
+// ~/Library/Application Support, but herdr keeps its own config and socket
+// under ~/.config on macOS as well as Linux. Following herdr matters more here
+// than following the platform convention, since we have to find its socket.
+func configHome() (string, error) {
+	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
+		return dir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolving home directory: %w", err)
+	}
+	return filepath.Join(home, ".config"), nil
+}
+
+// DefaultConfigPath returns the default configuration file location.
+func DefaultConfigPath() (string, error) {
+	dir, err := configHome()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "herdr-pick", "config.yaml"), nil
+}
+
+// LoadConfig reads configuration from path, returning defaults if it is absent.
 func LoadConfig(path string) (Config, error) {
 	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return DefaultConfig(), nil
+	}
 	if err != nil {
 		return Config{}, fmt.Errorf("reading config: %w", err)
 	}
-	var cfg Config
+
+	cfg := DefaultConfig()
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parsing config: %w", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
 	}
 	return cfg, nil
 }
 
-// EnsureConfig creates the base dir and default config if they don't exist.
-func EnsureConfig(baseDir string) (Config, error) {
-	if err := os.MkdirAll(baseDir, 0o755); err != nil {
-		return Config{}, fmt.Errorf("creating base dir: %w", err)
-	}
-
-	configPath := filepath.Join(baseDir, "config.yaml")
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		data, err := yaml.Marshal(defaultConfig)
-		if err != nil {
-			return Config{}, fmt.Errorf("marshalling default config: %w", err)
+// Validate checks that the configuration is usable.
+func (c Config) Validate() error {
+	for _, org := range c.Orgs {
+		if org == "" {
+			return errors.New("config lists an empty org")
 		}
-		if err := os.WriteFile(configPath, data, 0o644); err != nil {
-			return Config{}, fmt.Errorf("writing default config: %w", err)
+		if strings.ContainsAny(org, "/\\") {
+			return fmt.Errorf("org %q must not contain a path separator", org)
 		}
-		return defaultConfig, nil
 	}
+	if _, err := c.TTL(); err != nil {
+		return err
+	}
+	return nil
+}
 
-	return LoadConfig(configPath)
+// TTL returns the parsed cache staleness threshold.
+func (c Config) TTL() (time.Duration, error) {
+	raw := c.CacheTTL
+	if raw == "" {
+		raw = defaultCacheTTL
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("parsing cache_ttl %q: %w", raw, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("cache_ttl must be positive, got %q", raw)
+	}
+	return d, nil
+}
+
+// RootDir returns the expanded root directory for clones, worktrees and caches.
+func (c Config) RootDir() (string, error) {
+	raw := c.Root
+	if raw == "" {
+		raw = defaultRoot
+	}
+	return ExpandHome(raw)
+}
+
+// AgentArgv returns the command used to launch the agent in a new workspace.
+func (c Config) AgentArgv() []string {
+	if len(c.Agent) == 0 {
+		return []string{defaultAgent}
+	}
+	return c.Agent
+}
+
+// ExpandHome expands a leading ~ in path to the user's home directory.
+func ExpandHome(path string) (string, error) {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolving home directory: %w", err)
+	}
+	if path == "~" {
+		return home, nil
+	}
+	return filepath.Join(home, path[2:]), nil
+}
+
+// RepoDir returns the parent clone directory for a repository.
+func RepoDir(root, org, repo string) string {
+	return filepath.Join(root, "repos", org, repo)
+}
+
+// WorktreeDir returns the worktree checkout directory for a branch.
+func WorktreeDir(root, org, repo, branch string) string {
+	return filepath.Join(root, "worktrees", org, repo, branch)
+}
+
+// CacheDir returns the directory holding per-org repository caches.
+func CacheDir(root string) string {
+	return filepath.Join(root, "cache")
+}
+
+// CacheFile returns the cache file path for an org.
+func CacheFile(root, org string) string {
+	return filepath.Join(CacheDir(root), org+".txt")
 }

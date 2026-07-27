@@ -2,128 +2,74 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"strings"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
-type fakeExecutor struct {
-	calls   []string
-	results map[string]string
-	errors  map[string]error
-}
-
-func newFakeExecutor() *fakeExecutor {
-	return &fakeExecutor{
-		results: make(map[string]string),
-		errors:  make(map[string]error),
+// writeBareClone creates a directory that looks like a bare clone.
+func writeBareClone(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("creating clone dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatalf("writing HEAD: %v", err)
 	}
 }
 
-func (f *fakeExecutor) Run(_ context.Context, name string, args ...string) (string, error) {
-	call := name + " " + strings.Join(args, " ")
-	f.calls = append(f.calls, call)
-	for pattern, err := range f.errors {
-		if strings.Contains(call, pattern) {
-			return "", err
-		}
-	}
-	for pattern, result := range f.results {
-		if strings.Contains(call, pattern) {
-			return result, nil
-		}
-	}
-	return "", nil
-}
+func TestEnsureCloneClonesBareWhenAbsent(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "repos", "giantswarm", "foo")
+	executor := &fakeExecutor{}
 
-func (f *fakeExecutor) RunAttached(_ context.Context, name string, args ...string) error {
-	call := name + " " + strings.Join(args, " ")
-	f.calls = append(f.calls, call)
-	for pattern, err := range f.errors {
-		if strings.Contains(call, pattern) {
-			return err
-		}
-	}
-	return nil
-}
-
-func TestBareClone(t *testing.T) {
-	fake := newFakeExecutor()
-	err := bareClone(context.Background(), fake, "git@github.com:org/repo.git", "/tmp/repo")
-	if err != nil {
+	if err := EnsureClone(context.Background(), executor, "giantswarm", "foo", dir); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(fake.calls) != 1 {
-		t.Fatalf("expected 1 call, got %d", len(fake.calls))
-	}
-	if !strings.Contains(fake.calls[0], "clone --bare") {
-		t.Fatalf("expected bare clone, got %q", fake.calls[0])
+	// Bare is what stops herdr opening the clone as a stray main workspace.
+	if !executor.ran("git", "clone", "--bare", "git@github.com:giantswarm/foo.git", dir) {
+		t.Fatalf("unexpected commands: %v", executor.calls)
 	}
 }
 
-func TestBareCloneError(t *testing.T) {
-	fake := newFakeExecutor()
-	fake.errors["clone"] = fmt.Errorf("clone failed")
-	err := bareClone(context.Background(), fake, "git@github.com:org/repo.git", "/tmp/repo")
+func TestEnsureCloneSkipsExistingBareClone(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "clone")
+	writeBareClone(t, dir)
+	executor := &fakeExecutor{}
+
+	if err := EnsureClone(context.Background(), executor, "giantswarm", "foo", dir); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(executor.calls) != 0 {
+		t.Fatalf("expected no commands, got %v", executor.calls)
+	}
+}
+
+// A leftover non-bare checkout must produce a clear error rather than letting
+// git fail with "already exists and is not an empty directory".
+func TestEnsureCloneRejectsNonBareCheckout(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "clone")
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatalf("creating .git: %v", err)
+	}
+	executor := &fakeExecutor{}
+
+	err := EnsureClone(context.Background(), executor, "giantswarm", "foo", dir)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-}
-
-func TestDefaultBranch(t *testing.T) {
-	fake := newFakeExecutor()
-	fake.results["symbolic-ref"] = "refs/heads/main"
-	branch, err := defaultBranch(context.Background(), fake, "/tmp/repo")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if branch != "main" {
-		t.Fatalf("got %q, want %q", branch, "main")
+	requireContains(t, err.Error(), "not a bare clone")
+	if len(executor.calls) != 0 {
+		t.Fatalf("expected no commands, got %v", executor.calls)
 	}
 }
 
-func TestCreateWorktree(t *testing.T) {
-	fake := newFakeExecutor()
-	err := createWorktree(context.Background(), fake, "/tmp/repo", "feature", "/tmp/repo/feature")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestIsBareRepo(t *testing.T) {
+	bare := filepath.Join(t.TempDir(), "bare")
+	writeBareClone(t, bare)
+	if !isBareRepo(bare) {
+		t.Fatal("expected bare clone to be recognised")
 	}
-	if !strings.Contains(fake.calls[0], "worktree add") {
-		t.Fatalf("expected worktree add, got %q", fake.calls[0])
-	}
-}
-
-func TestBranchExistsOnRemote(t *testing.T) {
-	fake := newFakeExecutor()
-	fake.results["ls-remote"] = "abc123\trefs/heads/main"
-	exists, err := branchExistsOnRemote(context.Background(), fake, "/tmp/repo", "main")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !exists {
-		t.Fatal("expected branch to exist")
-	}
-}
-
-func TestBranchDoesNotExistOnRemote(t *testing.T) {
-	fake := newFakeExecutor()
-	fake.results["ls-remote"] = ""
-	exists, err := branchExistsOnRemote(context.Background(), fake, "/tmp/repo", "nonexistent")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exists {
-		t.Fatal("expected branch not to exist")
-	}
-}
-
-func TestCreateBranch(t *testing.T) {
-	fake := newFakeExecutor()
-	err := gitCreateBranch(context.Background(), fake, "/tmp/repo", "feature", "main")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(fake.calls[0], "branch feature main") {
-		t.Fatalf("expected branch create, got %q", fake.calls[0])
+	if isBareRepo(filepath.Join(t.TempDir(), "absent")) {
+		t.Fatal("expected missing dir not to be a bare clone")
 	}
 }

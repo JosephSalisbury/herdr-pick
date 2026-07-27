@@ -3,94 +3,40 @@ package main
 import (
 	"context"
 	"fmt"
-	"strings"
+	"os"
+	"path/filepath"
 )
 
-func bareClone(ctx context.Context, executor Executor, url, dest string) error {
-	_, err := executor.Run(ctx, "git", "clone", "--bare", url, dest)
-	if err != nil {
-		return fmt.Errorf("bare cloning %s: %w", url, err)
+// EnsureClone bare-clones a repository into dir unless it is already there.
+//
+// Bare is deliberate. The clone exists only as a source for worktrees, and a
+// bare repo has no working tree — so herdr cannot open it as a stray "main"
+// workspace when it creates the parent for a worktree group, and nothing can
+// be accidentally committed into the worktree source.
+func EnsureClone(ctx context.Context, executor Executor, org, repo, dir string) error {
+	if isBareRepo(dir) {
+		return nil
+	}
+	// A non-bare checkout here is left over from an earlier layout. Say so,
+	// rather than letting git fail with "already exists and is not empty".
+	if _, err := os.Stat(dir); err == nil {
+		return fmt.Errorf("%s exists but is not a bare clone: remove it and retry", dir)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		return fmt.Errorf("creating clone parent dir: %w", err)
+	}
+
+	url := fmt.Sprintf("git@github.com:%s/%s.git", org, repo)
+	if _, err := executor.Run(ctx, "git", "clone", "--bare", url, dir); err != nil {
+		return fmt.Errorf("cloning %s/%s: %w", org, repo, err)
 	}
 	return nil
 }
 
-func defaultBranch(ctx context.Context, executor Executor, bareCloneDir string) (string, error) {
-	// In a bare clone, HEAD points to the default branch directly.
-	out, err := executor.Run(ctx, "git", "-C", bareCloneDir, "symbolic-ref", "HEAD")
-	if err != nil {
-		return "", fmt.Errorf("getting default branch: %w", err)
-	}
-	// Output is like "refs/heads/main"
-	parts := strings.Split(out, "/")
-	if len(parts) == 0 {
-		return "", fmt.Errorf("unexpected symbolic-ref output: %s", out)
-	}
-	return parts[len(parts)-1], nil
-}
-
-func createWorktree(ctx context.Context, executor Executor, bareCloneDir, branch, dest string) error {
-	_, err := executor.Run(ctx, "git", "-C", bareCloneDir, "worktree", "add", dest, branch)
-	if err != nil {
-		return fmt.Errorf("creating worktree for %s: %w", branch, err)
-	}
-	return nil
-}
-
-func branchExistsOnRemote(ctx context.Context, executor Executor, bareCloneDir, branch string) (bool, error) {
-	out, err := executor.Run(ctx, "git", "-C", bareCloneDir, "ls-remote", "--heads", "origin", branch)
-	if err != nil {
-		return false, fmt.Errorf("checking remote branch %s: %w", branch, err)
-	}
-	return strings.TrimSpace(out) != "", nil
-}
-
-func gitCreateBranch(ctx context.Context, executor Executor, bareCloneDir, branch, startPoint string) error {
-	_, err := executor.Run(ctx, "git", "-C", bareCloneDir, "branch", branch, startPoint)
-	if err != nil {
-		return fmt.Errorf("creating branch %s: %w", branch, err)
-	}
-	return nil
-}
-
-func hasUncommittedChanges(ctx context.Context, executor Executor, worktreeDir string) (bool, error) {
-	out, err := executor.Run(ctx, "git", "-C", worktreeDir, "status", "--porcelain")
-	if err != nil {
-		return false, fmt.Errorf("checking uncommitted changes: %w", err)
-	}
-	return strings.TrimSpace(out) != "", nil
-}
-
-func hasUnpushedCommits(ctx context.Context, executor Executor, bareCloneDir, branch, worktreeDir string) (bool, error) {
-	onRemote, err := branchExistsOnRemote(ctx, executor, bareCloneDir, branch)
-	if err != nil {
-		return false, err
-	}
-	if !onRemote {
-		return true, nil
-	}
-	// Verify the remote tracking ref is available locally before comparing.
-	_, err = executor.Run(ctx, "git", "-C", worktreeDir, "rev-parse", "--verify", "origin/"+branch)
-	if err != nil {
-		// Remote has the branch but we haven't fetched it locally,
-		// so we can't compare — treat as having unpushed commits.
-		return true, nil
-	}
-	out, err := executor.Run(ctx, "git", "-C", worktreeDir, "log", "origin/"+branch+"..HEAD", "--oneline")
-	if err != nil {
-		return false, fmt.Errorf("checking unpushed commits: %w", err)
-	}
-	return strings.TrimSpace(out) != "", nil
-}
-
-func removeWorktree(ctx context.Context, executor Executor, bareCloneDir, worktreePath string, force bool) error {
-	args := []string{"-C", bareCloneDir, "worktree", "remove"}
-	if force {
-		args = append(args, "--force")
-	}
-	args = append(args, worktreePath)
-	_, err := executor.Run(ctx, "git", args...)
-	if err != nil {
-		return fmt.Errorf("removing worktree %s: %w", worktreePath, err)
-	}
-	return nil
+// isBareRepo reports whether dir holds a bare clone. A bare repo keeps HEAD at
+// its top level; a normal checkout keeps it inside .git.
+func isBareRepo(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, "HEAD"))
+	return err == nil
 }

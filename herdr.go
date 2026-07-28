@@ -13,7 +13,7 @@ import (
 
 // herdrProtocol is the socket protocol version this client was written
 // against. It is asserted on connect so a herdr upgrade fails loudly.
-const herdrProtocol = 16
+const herdrProtocol = 17
 
 // Agent statuses herdr reports for a workspace's foreground process. "done"
 // means the agent finished — those worktrees are cleanup candidates. The

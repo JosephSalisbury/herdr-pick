@@ -195,7 +195,7 @@ func TestPingRejectsProtocolMismatch(t *testing.T) {
 		t.Fatal("expected error, got nil")
 	}
 
-	ok := &fakeHerdr{results: map[string]string{"ping": `{"type":"pong","protocol":16}`}}
+	ok := &fakeHerdr{results: map[string]string{"ping": `{"type":"pong","protocol":17}`}}
 	if err := Ping(context.Background(), ok); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

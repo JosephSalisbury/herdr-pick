@@ -14,7 +14,7 @@ import (
 const (
 	defaultRoot     = "~/.local/share/herdr-pick"
 	defaultCacheTTL = "6h"
-	defaultAgent    = "claude"
+	defaultAgent    = "claudebox"
 )
 
 // Config holds herdr-pick configuration.

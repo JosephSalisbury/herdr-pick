@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -41,8 +42,20 @@ func open(ctx context.Context, executor Executor, herdr Herdr, cfg Config, root,
 	}
 
 	cloneDir := RepoDir(root, org, repo)
-	if err := EnsureClone(ctx, executor, org, repo, cloneDir); err != nil {
+	cloned, err := EnsureClone(ctx, executor, org, repo, cloneDir)
+	if err != nil {
 		return "", err
+	}
+	// An existing clone is as stale as its last fetch, and worktree.create can
+	// only branch off what it holds — so refresh it first, or every worktree
+	// after the first starts from an ever-older main and merges get worse.
+	//
+	// A failure here is a warning, not an error: offline or VPN down, starting
+	// work from a stale main still beats not starting it.
+	if !cloned {
+		if err := FetchDefaultBranch(ctx, executor, cloneDir); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+		}
 	}
 
 	path := WorktreeDir(root, org, repo, branch)

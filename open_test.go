@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -110,14 +111,56 @@ func TestOpenRejectsInvalidBranch(t *testing.T) {
 
 func TestOpenSkipsCloneWhenBareClonePresent(t *testing.T) {
 	root := t.TempDir()
-	writeBareClone(t, RepoDir(root, "giantswarm", "foo"))
-	executor := &fakeExecutor{}
+	cloneDir := RepoDir(root, "giantswarm", "foo")
+	writeBareClone(t, cloneDir)
+	executor := &fakeExecutor{outputs: map[string]string{"git": "main"}}
 
 	if _, err := Open(context.Background(), executor, openHerdr(), testConfig(), root, "giantswarm/foo", "iron-lich"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(executor.calls) != 0 {
-		t.Fatalf("expected no git commands, got %v", executor.calls)
+	if executor.ran("git", "clone") {
+		t.Fatalf("expected no clone, got %v", executor.calls)
+	}
+	// The whole point: the existing clone is refreshed, so the new worktree
+	// branches off current main rather than main as of the original clone.
+	if !executor.ran("git", "-C", cloneDir, "fetch", "--quiet", "origin", "+main:main") {
+		t.Fatalf("expected the clone to be fetched, got %v", executor.calls)
+	}
+}
+
+// A clone we just made is already current — fetching it again is a wasted
+// round trip on the slowest path there is.
+func TestOpenSkipsFetchAfterFreshClone(t *testing.T) {
+	executor := &fakeExecutor{outputs: map[string]string{"git": "main"}}
+
+	if _, err := Open(context.Background(), executor, openHerdr(), testConfig(), t.TempDir(), "giantswarm/foo", "iron-lich"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !executor.ran("git", "clone", "--bare") {
+		t.Fatalf("expected a clone, got %v", executor.calls)
+	}
+	for _, call := range executor.calls {
+		for _, arg := range call {
+			if arg == "fetch" {
+				t.Fatalf("expected no fetch, got %v", executor.calls)
+			}
+		}
+	}
+}
+
+// Offline or VPN down must not stop work starting; a stale main is better than
+// no worktree.
+func TestOpenContinuesWhenFetchFails(t *testing.T) {
+	root := t.TempDir()
+	writeBareClone(t, RepoDir(root, "giantswarm", "foo"))
+	executor := &fakeExecutor{err: errors.New("could not read from remote")}
+	herdr := openHerdr()
+
+	if _, err := Open(context.Background(), executor, herdr, testConfig(), root, "giantswarm/foo", "iron-lich"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !herdr.called("worktree.create") || !herdr.called("pane.send_input") {
+		t.Fatalf("expected the worktree to be created anyway, got %v", herdr.methods)
 	}
 }
 

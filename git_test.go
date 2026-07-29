@@ -22,8 +22,12 @@ func TestEnsureCloneClonesBareWhenAbsent(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "repos", "giantswarm", "foo")
 	executor := &fakeExecutor{}
 
-	if err := EnsureClone(context.Background(), executor, "giantswarm", "foo", dir); err != nil {
+	cloned, err := EnsureClone(context.Background(), executor, "giantswarm", "foo", dir)
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cloned {
+		t.Fatal("expected a fresh clone to be reported")
 	}
 	// Bare is what stops herdr opening the clone as a stray main workspace.
 	if !executor.ran("git", "clone", "--bare", "git@github.com:giantswarm/foo.git", dir) {
@@ -36,8 +40,12 @@ func TestEnsureCloneSkipsExistingBareClone(t *testing.T) {
 	writeBareClone(t, dir)
 	executor := &fakeExecutor{}
 
-	if err := EnsureClone(context.Background(), executor, "giantswarm", "foo", dir); err != nil {
+	cloned, err := EnsureClone(context.Background(), executor, "giantswarm", "foo", dir)
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if cloned {
+		t.Fatal("expected an existing clone not to be reported as fresh")
 	}
 	if len(executor.calls) != 0 {
 		t.Fatalf("expected no commands, got %v", executor.calls)
@@ -53,13 +61,44 @@ func TestEnsureCloneRejectsNonBareCheckout(t *testing.T) {
 	}
 	executor := &fakeExecutor{}
 
-	err := EnsureClone(context.Background(), executor, "giantswarm", "foo", dir)
+	_, err := EnsureClone(context.Background(), executor, "giantswarm", "foo", dir)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
 	requireContains(t, err.Error(), "not a bare clone")
 	if len(executor.calls) != 0 {
 		t.Fatalf("expected no commands, got %v", executor.calls)
+	}
+}
+
+// Without this, worktree.create can only branch off main as of the first clone.
+func TestFetchDefaultBranchFetchesTheBranchAtHead(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "clone")
+	executor := &fakeExecutor{outputs: map[string]string{"git": "main"}}
+
+	if err := FetchDefaultBranch(context.Background(), executor, dir); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !executor.ran("git", "-C", dir, "symbolic-ref", "--short", "HEAD") {
+		t.Fatalf("expected HEAD to be resolved, got %v", executor.calls)
+	}
+	// Forced, so a rewritten main still lands. Only HEAD's branch is fetched:
+	// +refs/heads/* would fail on branches checked out in a worktree.
+	if !executor.ran("git", "-C", dir, "fetch", "--quiet", "origin", "+main:main") {
+		t.Fatalf("expected a forced fetch of main, got %v", executor.calls)
+	}
+}
+
+func TestFetchDefaultBranchErrorsWithoutABranchAtHead(t *testing.T) {
+	executor := &fakeExecutor{}
+
+	err := FetchDefaultBranch(context.Background(), executor, "/clone")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	requireContains(t, err.Error(), "no branch at HEAD")
+	if executor.ran("git", "-C", "/clone", "fetch") {
+		t.Fatalf("expected no fetch, got %v", executor.calls)
 	}
 }
 

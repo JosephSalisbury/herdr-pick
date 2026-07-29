@@ -24,7 +24,7 @@ prefix+o  →  herdr-pick pick
                 ├─ fzf
                 ├─ existing worktree  →  worktree.open (focus)
                 └─ bare repo          →  prompt branch (default: generated name)
-                                      →  git clone if absent
+                                      →  git clone if absent, else fetch main
                                       →  worktree.create
                                       →  agent.start in the new workspace
 ```
@@ -103,6 +103,27 @@ source. A bare clone has no working tree, so there is nothing to open.
 `isBareRepo` detects an existing clone by `HEAD` at the top level rather than a
 `.git` directory. A leftover non-bare checkout is reported as an error rather
 than left for git to fail on confusingly.
+
+### Why the clone is fetched before every new worktree
+
+A bare clone has no remote-tracking refs, so `worktree.create` can only branch
+off the clone's own `HEAD` — frozen at whatever the *first* clone of that repo
+captured. Left alone, the second and every later worktree for a repo starts
+from an ever-older main, and the merge conflicts grow with it. So
+`FetchDefaultBranch` runs first on a clone that was already on disk (a clone we
+just made is current, and re-fetching it wastes a round trip on the slowest
+path there is).
+
+Only the branch `HEAD` points at is fetched, forced (`+main:main`):
+
+- Forced, because a rewritten main — force-push, squashed merge — would
+  otherwise be rejected and leave the stale ref. Overwriting is safe here; the
+  clone is a worktree source and is never committed into.
+- Only that one branch, because `+refs/heads/*:refs/heads/*` fails on any branch
+  already checked out in a worktree, which here is most of them.
+
+A fetch failure is a warning, not an error, like the cache refresh: offline or
+VPN down, a worktree off a stale main still beats no worktree.
 
 ## Platform
 

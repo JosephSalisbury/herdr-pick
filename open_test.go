@@ -124,13 +124,16 @@ func TestOpenSyncsExistingCloneInsteadOfCloning(t *testing.T) {
 	if executor.ran("git", "clone") {
 		t.Fatalf("expected no clone, got %v", executor.calls)
 	}
-	if !executor.ran("git", "-C", cloneDir, "fetch", "origin", originRefspec, "+refs/heads/main:refs/heads/main") {
+	// The whole point: the existing clone is refreshed, so the new worktree
+	// branches off current main rather than main as of the original clone.
+	if !executor.ran("git", "-C", cloneDir, "fetch", "--quiet", "origin", originRefspec, "+refs/heads/main:refs/heads/main") {
 		t.Fatalf("expected the clone to be synced, got %v", executor.calls)
 	}
 }
 
-// A fresh clone is synced too: `clone --bare` leaves no refs/remotes/origin/*,
-// so skipping the sync would hand back the one repo that cannot merge main.
+// A fresh clone is synced too. It is current commit-wise, so this looks like a
+// wasted round trip — but `clone --bare` leaves no refs/remotes/origin/*, so
+// skipping it would hand back the one repo that cannot merge main.
 func TestOpenSyncsFreshClone(t *testing.T) {
 	root := t.TempDir()
 	cloneDir := RepoDir(root, "giantswarm", "foo")
@@ -142,24 +145,24 @@ func TestOpenSyncsFreshClone(t *testing.T) {
 	if !executor.ran("git", "clone", "--bare", "git@github.com:giantswarm/foo.git", cloneDir) {
 		t.Fatalf("expected a bare clone, got %v", executor.calls)
 	}
-	if !executor.ran("git", "-C", cloneDir, "fetch", "origin", originRefspec, "+refs/heads/main:refs/heads/main") {
+	if !executor.ran("git", "-C", cloneDir, "fetch", "--quiet", "origin", originRefspec, "+refs/heads/main:refs/heads/main") {
 		t.Fatalf("expected the fresh clone to be synced, got %v", executor.calls)
 	}
 }
 
-// Offline, a worktree off stale main still beats no worktree: the sync
-// failure is a warning and the work opens anyway.
+// Offline or VPN down must not stop work starting; a stale main is better than
+// no worktree.
 func TestOpenContinuesWhenSyncFails(t *testing.T) {
 	root := t.TempDir()
 	writeBareClone(t, RepoDir(root, "giantswarm", "foo"))
-	executor := &fakeExecutor{err: errors.New("no network")}
+	executor := &fakeExecutor{err: errors.New("could not read from remote")}
 	herdr := openHerdr()
 
 	if _, err := Open(context.Background(), executor, herdr, testConfig(), root, "giantswarm/foo", "iron-lich"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !herdr.called("worktree.create") || !herdr.called("pane.send_input") {
-		t.Fatalf("expected the workspace to open anyway, got %v", herdr.methods)
+		t.Fatalf("expected the worktree to be created anyway, got %v", herdr.methods)
 	}
 }
 

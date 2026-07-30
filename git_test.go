@@ -75,9 +75,10 @@ func TestSyncCloneFetchesBothNamespaces(t *testing.T) {
 		t.Fatalf("expected HEAD to be resolved, got %v", executor.calls)
 	}
 	// Explicit refspecs, because an explicit one overrides the configured one —
-	// and scoped to the default branch, since a wildcard into refs/heads would
-	// fail on any branch a worktree has checked out.
-	if !executor.ran("git", "-C", dir, "fetch", "origin", originRefspec, "+refs/heads/trunk:refs/heads/trunk") {
+	// and the refs/heads half is scoped to the default branch and forced, since a
+	// wildcard would fail on any branch a worktree has checked out and an
+	// unforced fetch would reject a rewritten main.
+	if !executor.ran("git", "-C", dir, "fetch", "--quiet", "origin", originRefspec, "+refs/heads/trunk:refs/heads/trunk") {
 		t.Fatalf("expected both refspecs in one fetch, got %v", executor.calls)
 	}
 }
@@ -108,6 +109,22 @@ func TestEnsureCloneRejectsNonBareCheckout(t *testing.T) {
 	requireContains(t, err.Error(), "not a bare clone")
 	if len(executor.calls) != 0 {
 		t.Fatalf("expected no commands, got %v", executor.calls)
+	}
+}
+
+// A detached or otherwise branchless HEAD gives nothing to fetch into and
+// nothing for herdr to branch from, so it must be reported rather than turned
+// into a fetch with an empty refspec.
+func TestSyncCloneErrorsWithoutABranchAtHead(t *testing.T) {
+	executor := &fakeExecutor{}
+
+	err := SyncClone(context.Background(), executor, "/clone")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	requireContains(t, err.Error(), "no default branch")
+	if executor.ran("git", "-C", "/clone", "fetch") {
+		t.Fatalf("expected no fetch, got %v", executor.calls)
 	}
 }
 

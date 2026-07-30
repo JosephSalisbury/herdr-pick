@@ -72,8 +72,13 @@ func SyncClone(ctx context.Context, executor Executor, dir string) error {
 	// HEAD resolves to and what herdr branches from. Only the default branch:
 	// +refs/heads/*:refs/heads/* would fail on any branch a worktree has checked
 	// out, which here is every branch we ever create.
+	//
+	// Forced, like the remote-tracking half: the clone is only ever a worktree
+	// source and is never committed into, so overwriting its default branch
+	// cannot discard work. Without the '+' a rewritten main (a force-push, a
+	// squashed merge) would be rejected and leave the stale ref in place.
 	head := fmt.Sprintf("+refs/heads/%s:refs/heads/%s", branch, branch)
-	if _, err := executor.Run(ctx, "git", "-C", dir, "fetch", "origin", originRefspec, head); err != nil {
+	if _, err := executor.Run(ctx, "git", "-C", dir, "fetch", "--quiet", "origin", originRefspec, head); err != nil {
 		return fmt.Errorf("fetching %s in %s: %w", branch, dir, err)
 	}
 	return nil

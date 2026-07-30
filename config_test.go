@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -145,15 +146,18 @@ func TestExpandHome(t *testing.T) {
 	}
 }
 
-// A repo's clone and its checkouts share one directory, so everything for a
-// project is in one place.
+// Clones and checkouts live under separate roots: clones are only ever worktree
+// sources, and every checkout belongs to a namespace.
 func TestPathLayout(t *testing.T) {
 	root := "/r"
-	if got, want := RepoDir(root, "o", "p"), "/r/o/p/.bare"; got != want {
-		t.Fatalf("RepoDir got %q, want %q", got, want)
+	if got, want := CloneDir(root, "o", "p"), "/r/clones/o/p"; got != want {
+		t.Fatalf("CloneDir got %q, want %q", got, want)
 	}
-	if got, want := WorktreeDir(root, "o", "p", "b"), "/r/o/p/b"; got != want {
-		t.Fatalf("WorktreeDir got %q, want %q", got, want)
+	if got, want := NamespaceDir(root, "n"), "/r/ns/n"; got != want {
+		t.Fatalf("NamespaceDir got %q, want %q", got, want)
+	}
+	if got, want := MemberDir(root, "n", "p"), "/r/ns/n/p"; got != want {
+		t.Fatalf("MemberDir got %q, want %q", got, want)
 	}
 	if got, want := CacheFile(root, "o"), "/r/cache/o.txt"; got != want {
 		t.Fatalf("CacheFile got %q, want %q", got, want)
@@ -161,11 +165,31 @@ func TestPathLayout(t *testing.T) {
 }
 
 // Two orgs sharing a repo name must not collide on disk, which is why the org
-// is part of every path.
-func TestWorktreeDirIsOrgScoped(t *testing.T) {
-	a := WorktreeDir("/r", "giantswarm", "cluster-api", "main")
-	b := WorktreeDir("/r", "kubernetes-sigs", "cluster-api", "main")
+// is part of every clone path.
+func TestCloneDirIsOrgScoped(t *testing.T) {
+	a := CloneDir("/r", "giantswarm", "cluster-api")
+	b := CloneDir("/r", "kubernetes-sigs", "cluster-api")
 	if a == b {
 		t.Fatalf("expected distinct paths, both were %q", a)
+	}
+}
+
+// Nothing user-named sits at <root>, so no org, namespace or repo name can
+// collide with the three fixed roots. This is what removes the reserved-name
+// problem rather than doubling it.
+func TestFixedRootsCannotCollide(t *testing.T) {
+	root := "/r"
+	// An org literally called "ns" or "cache" is harmless: clones are nested a
+	// level deeper than the roots.
+	for _, org := range []string{"ns", "cache", "clones"} {
+		if got := CloneDir(root, org, "p"); !strings.HasPrefix(got, "/r/clones/") {
+			t.Fatalf("clone for org %q escaped the clones root: %q", org, got)
+		}
+	}
+	// Likewise a namespace named after a root.
+	for _, name := range []string{"clones", "cache"} {
+		if got := NamespaceDir(root, name); !strings.HasPrefix(got, "/r/ns/") {
+			t.Fatalf("namespace %q escaped the ns root: %q", name, got)
+		}
 	}
 }

@@ -13,10 +13,32 @@ type fakeExecutor struct {
 	calls   [][]string
 	outputs map[string]string
 	err     error
+
+	// matches are consulted before outputs and err, keyed by a substring of the
+	// whole argv. Several git subcommands share the name "git", so this is how a
+	// single fake answers `git branch --list` and `git symbolic-ref`
+	// differently.
+	matches []fakeMatch
+}
+
+// fakeMatch is a canned reply for any argv containing contains.
+type fakeMatch struct {
+	contains string
+	out      string
+	err      error
 }
 
 func (f *fakeExecutor) Run(_ context.Context, name string, args ...string) (string, error) {
-	f.calls = append(f.calls, append([]string{name}, args...))
+	argv := append([]string{name}, args...)
+	f.calls = append(f.calls, argv)
+
+	line := strings.Join(argv, " ")
+	for _, m := range f.matches {
+		if strings.Contains(line, m.contains) {
+			return m.out, m.err
+		}
+	}
+
 	if f.err != nil {
 		return "", f.err
 	}

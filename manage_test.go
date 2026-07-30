@@ -1,75 +1,83 @@
 package main
 
 import (
-	"context"
-	"path/filepath"
 	"testing"
 )
 
-func TestOwnsWorktree(t *testing.T) {
+func TestOwnsPath(t *testing.T) {
 	root := "/data/herdr-pick"
 
-	owned := filepath.Join(root, "giantswarm", "foo", "iron-lich")
-	if !OwnsWorktree(root, owned) {
-		t.Fatalf("expected %q to be owned", owned)
+	for _, owned := range []string{
+		NamespaceDir(root, "add-foo"),
+		MemberDir(root, "add-foo", "claudebox"),
+	} {
+		if !OwnsPath(root, owned) {
+			t.Fatalf("expected %q to be owned", owned)
+		}
 	}
 
 	for _, foreign := range []string{
 		"",
 		"/somewhere/else",
-		// The clone is a worktree source, never a workspace.
-		filepath.Join(root, "giantswarm", "foo", ".bare"),
-		"/data/herdr-pick-evil/giantswarm/foo/x", // prefix but not a child
+		// Clones have their own root: a worktree source is never a workspace.
+		CloneDir(root, "giantswarm", "foo"),
+		"/data/herdr-pick-evil/ns/x/y", // prefix but not a child
 		root,
+		NamespaceRoot(root),
 	} {
-		if OwnsWorktree(root, foreign) {
+		if OwnsPath(root, foreign) {
 			t.Fatalf("expected %q not to be owned", foreign)
 		}
 	}
 }
 
-// ws is a compact workspace builder for the management tests.
-func ws(id, checkout, status string) HerdrWorkspace {
-	w := HerdrWorkspace{WorkspaceID: id, Label: id, AgentStatus: status}
-	if checkout != "" {
-		w.Worktree = &HerdrWorkspaceWorktree{CheckoutPath: checkout}
-	}
-	return w
+// ws and pane are compact builders for the management tests. A workspace is
+// located through its pane's working directory, so the two go together.
+func ws(id, status string) HerdrWorkspace {
+	return HerdrWorkspace{WorkspaceID: id, Label: id, AgentStatus: status}
 }
 
-func TestDoneWorkspacesFiltersToOwnedAndDone(t *testing.T) {
+func pane(workspaceID, dir string) HerdrPane {
+	return HerdrPane{PaneID: "p-" + workspaceID, WorkspaceID: workspaceID, Cwd: dir}
+}
+
+// A workspace with no pane anywhere near a namespace is somebody else's work.
+func TestOwnedWorkspacesMatchesByPaneDirectory(t *testing.T) {
 	root := "/r"
-	base := filepath.Join(root, "o", "r")
-	workspaces := []HerdrWorkspace{
-		ws("a", filepath.Join(base, "a"), AgentDone),
-		ws("b", filepath.Join(base, "b"), AgentWorking), // not done
-		ws("c", "/elsewhere/c", AgentDone),              // done but not ours
-		ws("d", "", AgentDone),                          // no worktree
-		ws("e", filepath.Join(base, "e"), AgentDone),
+	workspaces := []HerdrWorkspace{ws("a", AgentWorking), ws("b", AgentIdle), ws("c", AgentDone)}
+	panes := []HerdrPane{
+		pane("a", NamespaceDir(root, "add-foo")),
+		pane("b", "/elsewhere"),
+		// c has no pane at all.
 	}
 
-	got := DoneWorkspaces(root, workspaces)
-	if len(got) != 2 {
-		t.Fatalf("got %d, want 2: %+v", len(got), got)
+	got := OwnedWorkspaces(root, workspaces, panes)
+	if len(got) != 1 || got[0].WorkspaceID != "a" {
+		t.Fatalf("got %+v, want just a", got)
 	}
-	ids := map[string]bool{got[0].WorkspaceID: true, got[1].WorkspaceID: true}
-	if !ids["a"] || !ids["e"] {
-		t.Fatalf("expected a and e, got %v", ids)
+}
+
+// fleet builds a set of namespace workspaces plus one foreign workspace, each
+// located by its pane.
+func fleet(root string, statuses map[string]string) ([]HerdrWorkspace, []HerdrPane) {
+	var workspaces []HerdrWorkspace
+	var panes []HerdrPane
+	for id, status := range statuses {
+		workspaces = append(workspaces, ws(id, status))
+		panes = append(panes, pane(id, NamespaceDir(root, id)))
 	}
+	workspaces = append(workspaces, ws("foreign", AgentWorking))
+	panes = append(panes, pane("foreign", "/elsewhere"))
+	return workspaces, panes
 }
 
 func TestSwitchCandidatesActiveOnlyByDefault(t *testing.T) {
 	root := "/r"
-	base := filepath.Join(root, "o", "r")
-	workspaces := []HerdrWorkspace{
-		ws("idle", filepath.Join(base, "idle"), AgentIdle),
-		ws("working", filepath.Join(base, "working"), AgentWorking),
-		ws("done", filepath.Join(base, "done"), AgentDone),
-		ws("blocked", filepath.Join(base, "blocked"), AgentBlocked),
-		ws("foreign", "/elsewhere", AgentWorking),
-	}
+	workspaces, panes := fleet(root, map[string]string{
+		"idle": AgentIdle, "working": AgentWorking, "done": AgentDone, "blocked": AgentBlocked,
+	})
 
-	got := SwitchCandidates(root, workspaces, false)
+	got := SwitchCandidates(root, workspaces, panes, false)
 	if len(got) != 3 {
 		t.Fatalf("got %d active, want 3: %+v", len(got), got)
 	}
@@ -78,7 +86,7 @@ func TestSwitchCandidatesActiveOnlyByDefault(t *testing.T) {
 		t.Fatalf("wrong order: %s %s %s", got[0].WorkspaceID, got[1].WorkspaceID, got[2].WorkspaceID)
 	}
 
-	all := SwitchCandidates(root, workspaces, true)
+	all := SwitchCandidates(root, workspaces, panes, true)
 	if len(all) != 4 {
 		t.Fatalf("got %d with --all, want 4 (owned): %+v", len(all), all)
 	}
@@ -87,42 +95,13 @@ func TestSwitchCandidatesActiveOnlyByDefault(t *testing.T) {
 	}
 }
 
-func TestCleanDoneRemovesOnlyOwnedDone(t *testing.T) {
-	root := "/r"
-	base := filepath.Join(root, "o", "r")
-	herdr := &fakeHerdr{results: map[string]string{
-		"workspace.list": `{"type":"workspace_list","workspaces":[
-			{"workspace_id":"a","label":"a","agent_status":"done","worktree":{"checkout_path":"` + filepath.Join(base, "a") + `"}},
-			{"workspace_id":"b","label":"b","agent_status":"working","worktree":{"checkout_path":"` + filepath.Join(base, "b") + `"}},
-			{"workspace_id":"c","label":"c","agent_status":"done","worktree":{"checkout_path":"/elsewhere/c"}}
-		]}`,
-		"worktree.remove": `{"type":"worktree_removed","path":"` + filepath.Join(base, "a") + `","workspace_id":"a","forced":false}`,
-	}}
-
-	removed, err := CleanDone(context.Background(), herdr, root, false)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(removed) != 1 {
-		t.Fatalf("got %d removed, want 1: %v", len(removed), removed)
-	}
-	// Only workspace "a" is both ours and done.
-	if got, _ := herdr.paramsFor("worktree.remove")["workspace_id"].(string); got != "a" {
-		t.Fatalf("removed workspace %q, want a", got)
-	}
-}
-
 func TestStatusWorkspacesIncludesDoneAndOrdersByUrgency(t *testing.T) {
 	root := "/r"
-	base := filepath.Join(root, "o", "r")
-	workspaces := []HerdrWorkspace{
-		ws("done", filepath.Join(base, "done"), AgentDone),
-		ws("idle", filepath.Join(base, "idle"), AgentIdle),
-		ws("blocked", filepath.Join(base, "blocked"), AgentBlocked),
-		ws("foreign", "/elsewhere", AgentWorking),
-	}
+	workspaces, panes := fleet(root, map[string]string{
+		"done": AgentDone, "idle": AgentIdle, "blocked": AgentBlocked,
+	})
 
-	got := StatusWorkspaces(root, workspaces)
+	got := StatusWorkspaces(root, workspaces, panes)
 	if len(got) != 3 {
 		t.Fatalf("got %d, want 3 (owned): %+v", len(got), got)
 	}
@@ -132,7 +111,7 @@ func TestStatusWorkspacesIncludesDoneAndOrdersByUrgency(t *testing.T) {
 }
 
 func TestStatusLineIsStatusThenLabel(t *testing.T) {
-	line := statusLine(ws("w1", "/wt/a", AgentBlocked))
+	line := statusLine(ws("w1", AgentBlocked))
 	if line != "blocked\tw1" {
 		t.Fatalf("got %q, want %q", line, "blocked\tw1")
 	}
@@ -140,8 +119,8 @@ func TestStatusLineIsStatusThenLabel(t *testing.T) {
 
 func TestSwitchLinesRoundTripToWorkspaceID(t *testing.T) {
 	workspaces := []HerdrWorkspace{
-		ws("w1", "/wt/a", AgentWorking),
-		ws("w2", "/wt/b", AgentIdle),
+		ws("w1", AgentWorking),
+		ws("w2", AgentIdle),
 	}
 	lines, byLine := switchLines(workspaces)
 	if len(lines) != 2 {

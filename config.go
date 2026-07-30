@@ -149,29 +149,49 @@ func ExpandHome(path string) (string, error) {
 	return filepath.Join(home, path[2:]), nil
 }
 
-// A repository's clone and its checkouts live in one directory per repo:
+// Everything lives under three fixed roots, and nothing user-named sits at
+// <root> itself:
 //
-//	<root>/<org>/<repo>/.bare/     the clone
-//	<root>/<org>/<repo>/<branch>/  the worktrees
+//	<root>/clones/<org>/<repo>/  bare clones, only ever worktree sources
+//	<root>/ns/<name>/<repo>/     checkouts, one per namespace member
+//	<root>/cache/<org>.txt       derived data, safe to delete
 //
-// The leading dot on .bare is load-bearing. git forbids a branch name component
-// starting with '.', so the clone can never collide with a worktree beside it.
-const bareDir = ".bare"
+// Keeping orgs and namespace names a level below the roots is what removes the
+// reserved-name problem altogether: no org, namespace or repo can shadow a root,
+// so no walk needs a skip list. The alternative — orgs directly at <root> —
+// costs one less level but shadows any org sharing a root's name.
+//
+// A clone needs no ".bare" suffix because a checkout is never its sibling, so
+// there is nothing for it to collide with. It stays bare so the worktree source
+// has no working tree to be committed into.
+const (
+	cloneRoot = "clones"
+	nsRoot    = "ns"
+	cacheRoot = "cache"
+)
 
-// cacheRoot is the one directory at <root> that is not an org. Orgs sit
-// directly at <root>, so this name is never walked for worktrees: an org called
-// "cache" would be shadowed, which is the price of dropping a nesting level.
-const cacheRoot = "cache"
-
-// RepoDir returns the bare clone directory for a repository.
-func RepoDir(root, org, repo string) string {
-	return filepath.Join(root, org, repo, bareDir)
+// CloneDir returns the bare clone directory for a repository.
+func CloneDir(root, org, repo string) string {
+	return filepath.Join(root, cloneRoot, org, repo)
 }
 
-// WorktreeDir returns the worktree checkout directory for a branch, beside the
-// clone it came from.
-func WorktreeDir(root, org, repo, branch string) string {
-	return filepath.Join(root, org, repo, branch)
+// NamespaceRoot returns the directory holding every namespace.
+func NamespaceRoot(root string) string {
+	return filepath.Join(root, nsRoot)
+}
+
+// NamespaceDir returns a namespace's directory, which is the agent's working
+// directory and the one path claudebox mounts.
+func NamespaceDir(root, name string) string {
+	return filepath.Join(root, nsRoot, name)
+}
+
+// MemberDir returns the checkout directory for one member of a namespace. The
+// org is dropped: the agent's view of its own cwd is a flat list of repo names,
+// which is the point of a namespace. Two orgs sharing a repo name therefore
+// cannot both be members, and CreateNamespace rejects that at creation.
+func MemberDir(root, name, repo string) string {
+	return filepath.Join(root, nsRoot, name, repo)
 }
 
 // CacheDir returns the directory holding per-org repository caches.

@@ -1,143 +1,254 @@
 # herdr-pick
 
-A project picker for [herdr](https://herdr.dev). Hit a key, fuzzy-find a project across your GitHub orgs and your existing worktrees, and get a herdr workspace with an agent already running in it.
+A namespace picker for [herdr](https://herdr.dev). Hit a key, fuzzy-find the
+repositories you want to work on, name the work, and get a herdr workspace with
+an agent already running over all of them.
 
 ## Why this exists
 
-herdr already does most of the work: `worktree.create` makes the branch and the checkout, opens it as a workspace, and groups it with the parent repo's workspace. `worktree.open` is idempotent. `worktree.remove` cleans up.
+herdr already does most of the work: `worktree.open` opens a checkout as a
+workspace and is idempotent, and it groups a workspace with its parent repo's.
 
-Four things it does not do, which is all this tool is:
+What it does not do, which is all this tool is:
 
-1. **Cold start.** `worktree.create` needs a checkout that already exists on disk. Nothing clones `giantswarm/foo` for you.
-2. **Discovery.** There is no fuzzy picker spanning "repos I could work on" and "worktrees I already have".
+1. **Cold start.** Nothing clones `giantswarm/foo` for you.
+2. **Discovery.** There is no fuzzy picker spanning "repos I could work on" and
+   "work I already have in flight".
 3. **Launching the agent** in the workspace that comes back.
-4. **Herding.** herdr can focus a workspace and remove a worktree, but it does not know which of them are *yours*, which have a live agent, or which are finished. The management commands answer those questions and then hand the actual work back to herdr.
+4. **One workspace over several repositories.** herdr's unit is one worktree,
+   and coupled work spans more than one.
+5. **Herding.** herdr can focus a workspace but does not know which are *yours*
+   or which have a live agent.
 
-Anything herdr can already do is herdr's job. Resist adding to this. The management commands only ever *select* — herdr does the focusing and removing.
+Anything herdr can already do is herdr's job. Resist adding to this.
 
-## How it works
+## Namespaces
+
+A **namespace** is the unit of work: a named directory holding one checkout per
+participating repository, opened as a single herdr workspace with a single agent
+over all of them.
 
 ```
 prefix+o  →  herdr-pick pick
                 │
-                ├─ candidates: worktrees on disk, then cached GitHub repos
-                ├─ fzf
-                ├─ existing worktree  →  worktree.open (focus)
-                └─ bare repo          →  prompt branch (default: generated name)
-                                      →  git clone if absent
-                                      →  sync clone (fetch main + origin/* refs)
-                                      →  worktree.create
-                                      →  agent.start in the new workspace
+                ├─ candidates: existing namespaces, then cached GitHub repos
+                ├─ fzf --multi
+                ├─ one namespace selected  →  resume it
+                └─ repos marked            →  prompt name
+                                           →  clone what's missing
+                                           →  sync each clone
+                                           →  git worktree add each member
+                                           →  open, then start the agent
 ```
+
+The namespace name is also the **branch name in every member**, so one feature
+name identifies the work everywhere it lands.
+
+**A one-repo project is a namespace with one member.** There is no separate
+single-repo path, and selecting a single repo behaves exactly as picking a
+project always did: choose it, then name the work.
+
+Namespaces exist because the work that needs them is *coupled* — one related
+change across fewer than five repos, where the agent has to see every member to
+get any of them right. The same change repeated across many repos is a different
+problem, better served by many single-repo agents; don't grow namespaces toward
+it.
 
 ### Disk layout
 
-Everything lives under one root, hidden by default (`~/.local/share/herdr-pick`):
+Three fixed roots under `~/.local/share/herdr-pick`, and nothing user-named at
+the top:
 
 ```
 <root>/
-├── <org>/<repo>/.bare/     # clone, only ever a worktree source
-├── <org>/<repo>/<branch>/  # checkouts, passed to herdr as --path
+├── clones/<org>/<repo>/    # bare clones, only ever worktree sources
+├── ns/<name>/<repo>/       # every checkout, one per namespace member
 └── cache/<org>.txt         # one repo per line
 ```
 
-A repository's clone and all its checkouts share one directory, so everything
-for a project is in one place.
+Keeping orgs and namespace names a level below the roots is what removes the
+reserved-name problem instead of creating one: no org, namespace or repo can
+shadow a root, so **no walk needs a skip list**. The alternative — orgs sitting
+directly at `<root>` — saves a level but shadows any org sharing a root's name.
 
-`.bare` sits beside the worktrees rather than containing them because git owns
-that namespace: a bare repo keeps its linked-worktree bookkeeping in
-`<clone>/worktrees/<id>/`, and its `objects`, `refs`, `config` and `hooks` at
-the top level. The leading dot is load-bearing — git forbids a branch name
-component starting with `.`, so `.bare` can never collide with a worktree
-directory next to it.
+A clone needs no `.bare` suffix, because a checkout is never its sibling and so
+there is nothing to collide with. It stays bare so the worktree source has no
+working tree to be committed into, and so herdr cannot open it as a stray "main"
+workspace when it creates the parent for a worktree group.
 
-The org is in every path deliberately. herdr's default layout is
-`<worktrees.directory>/<repo>/<branch-slug>` with no org component, so
-`giantswarm/cluster-api` and `kubernetes-sigs/cluster-api` would collide. We
-always pass an explicit path and never rely on `[worktrees] directory`.
+The org is in every clone path deliberately: `giantswarm/cluster-api` and
+`kubernetes-sigs/cluster-api` must not collide.
 
-A branch name is always exactly one path segment — slashes are rejected — so a
-directory name round-trips to a branch name with no slug table.
+Inside a namespace the org is **dropped** — a member is just `<repo>`, so the
+agent's view of its own cwd is a flat, readable list. The price is that two orgs
+sharing a repo name cannot both be members, which `CreateNamespace` rejects
+rather than silently resolves.
 
-Because orgs sit directly at `<root>`, `cache` is not walked as an org. An org
-with that name would be shadowed — accepted, in exchange for dropping a nesting
-level.
+A namespace name is always exactly one path segment — it is a branch name, so
+`ValidateBranchName` applies and slashes are rejected.
 
 ### Source of truth
 
-The filesystem. `<root>` is walked to find checkouts; a directory counts only if
-it contains a `.git` entry, which is also what excludes the `.bare` clone beside
-them. There is no database and no state file.
-The cache is derived data and is safe to delete at any time.
+The filesystem. `<root>/ns` is walked to find namespaces, and a subdirectory
+counts as a member only if it contains a `.git` entry. There is no database and
+no state file. The cache is derived data and is safe to delete at any time.
+
+A namespace directory with no members is skipped, which is what keeps a
+half-built namespace — a create that failed partway — out of the picker.
+
+### The picker
+
+One keybinding does both verbs, because **what you selected decides which verb
+it is**: a namespace can only be resumed, and repositories can only start a new
+namespace. So there is nothing extra to confirm.
+
+- one namespace → resume
+- one repo, unmarked → a one-member namespace
+- several repos, TAB-marked → a namespace over all of them
+- a namespace mixed with repos → an error; the two verbs are not combinable
+
+Namespaces lead the list because returning to work already in flight is the
+commoner case.
+
+`fzf --multi` rather than asking repo-by-repo until done: marks are visible
+inline, unmarking works, and it is one screen and one Enter rather than one
+invocation per repository. For `claudebox` plus `claudebox-image` it is one query
+and two TABs.
+
+The name is asked for **after** the repositories. That is what lets the branch
+check run against them, and it keeps the one-repo case in the order it has always
+been.
+
+Picker lines do not round-trip. A `map[string]Candidate` carries the candidate
+instead, as `switchLines` does with workspace ids — which frees the line to be
+readable rather than parseable, so a namespace can list its members:
+
+```
+add-foo  (claudebox, claudebox-image)
+JosephSalisbury/claudebox
+JosephSalisbury/claudebox-image
+```
+
+Typing `claudebox-image` therefore finds both the namespace already containing it
+and the repo itself. Namespace and repo lines stay distinguishable without a
+sigil: a namespace name never contains a slash and a repo always contains exactly
+one.
 
 ### The GitHub cache
 
 Configured orgs are fetched with `gh repo list --limit 5000`. That is far too
-slow to sit in front of a keypress for a 1,700-repo org, so the picker only
-ever reads the cache. When a cache is older than `cache_ttl` the picker spawns
-a detached `herdr-pick refresh` and carries on with what it has — stale now,
-fresh next time. Orgs refresh concurrently and one failing org does not stop
-the others.
+slow to sit in front of a keypress for a 1,700-repo org, so the picker only ever
+reads the cache. When a cache is older than `cache_ttl` the picker spawns a
+detached `herdr-pick refresh` and carries on with what it has — stale now, fresh
+next time. Orgs refresh concurrently and one failing org does not stop the
+others.
 
 The consequence to remember: the very first run on a cold cache lists only
-local worktrees.
+existing namespaces.
 
 ### Talking to herdr
 
 Over the socket API (newline-delimited JSON), not the CLI. The socket's method
-and parameter names are pinned by a published schema (`herdr api schema`);
-the CLI's flags are not. `herdrProtocol` asserts the version so an upgrade
-fails loudly rather than strangely.
+and parameter names are pinned by a published schema (`herdr api schema`); the
+CLI's flags are not. `herdrProtocol` asserts the version so an upgrade fails
+loudly rather than strangely.
 
-Methods used: `ping`, `worktree.create`, `worktree.open`, `worktree.remove`,
-`workspace.list`, `workspace.focus`, `pane.list`, `pane.send_input`.
+Methods used: `ping`, `workspace.create`, `workspace.list`, `workspace.focus`,
+`pane.list`, `pane.send_input`.
 
-`worktree.remove` takes a `workspace_id`, not a path — another reason "done"
-cleanup only reaches open workspaces.
+**None of herdr's `worktree.*` methods are used.** herdr-pick does its own git and
+asks herdr only to open a directory. That is the single most important thing to
+know about this client.
+
+### The namespace directory is the workspace
+
+`workspace.create{cwd, label, focus}` opens any directory as a workspace and
+returns it with its `root_pane` — so creating a namespace's workspace is two
+calls, with no `pane.list` on that path.
+
+`worktree.open` was the obvious-looking alternative and is wrong twice over.
+Practically, it refuses a checkout whose clone is not its neighbour:
+
+```
+New and open worktree actions start from the repo parent workspace.
+  (linked_worktree_source)
+```
+
+Under the old layout a checkout sat beside its `.bare`, so herdr could infer the
+parent repo from the path; a namespace member's clone is under `clones/`, so it
+cannot. But the deeper reason is that a namespace is a *directory of checkouts*,
+not a checkout — pointing `worktree.open` at one member would make herdr believe
+the workspace were that member's, and `worktree.create` would open one workspace
+per member when the entire point is one workspace over all of them.
+
+`label` is set to the namespace name, so `status` and `switch` read `add-foo`.
+
+### Finding a namespace's workspace
+
+A directory-backed workspace has no worktree for herdr to report (`worktree` is
+nullable in `WorkspaceInfo`) and `WorkspaceInfo` carries no path of its own. So a
+workspace is matched to a namespace by its **pane's working directory** —
+`PaneInfo.cwd`, falling back to `foreground_cwd`.
+
+`pane.list` takes an *optional* `workspace_id`, so omitting it returns every pane
+in the session: one call locates every workspace on disk. This is still matching
+by where something is rather than by a state file — the same principle as the old
+`checkout_path` match, just relocated.
+
+It is also what lets opening a namespace focus an existing workspace instead of
+creating a second one onto the same checkouts.
 
 ### Why not agent.start
 
-`agent.start` looks like the obvious way to launch claude, but it has no
+`agent.start` looks like the obvious way to launch the agent, but it has no
 `pane_id` parameter and its only `split` values are `right` and `down` — so it
-always adds a *second* pane alongside the one `worktree.create` already made.
-One pane is the requirement.
+always adds a *second* pane alongside the one the workspace already has. One pane
+is the requirement.
 
-Instead: `pane.list` the new workspace, take the focused (or only) pane, and
+Instead: `pane.list` the workspace, take the focused (or only) pane, and
 `pane.send_input` the agent command with `keys: ["enter"]` — text and Enter in
-one call, which is how herdr's own `pane run` submits atomically under
-bracketed paste. herdr still tracks the agent, because it detects agents from
-the foreground process rather than from registration.
+one call, which is how herdr's own `pane run` submits atomically under bracketed
+paste. herdr still tracks the agent, because it detects agents from the
+foreground process rather than from registration.
 
-### Why the parent clone is bare
+The command is `cd <namespace> && <agent>`, absolute rather than relative, so it
+does not depend on where the pane's shell starts. **claudebox mounts exactly one
+directory — its cwd** — so the namespace has to *be* the cwd for the agent to see
+every member.
 
-`worktree.create` groups the new workspace with the parent repo's workspace,
-creating that parent from `--cwd` if it doesn't exist. With a normal clone that
-parent is a real checkout on `main`, so you get two workspaces per project and
-one of them is a checkout you must never commit into — it is the worktree
-source. A bare clone has no working tree, so there is nothing to open.
+### Check all, then act
 
-`isBareRepo` detects an existing clone by `HEAD` at the top level rather than a
-`.git` directory. A leftover non-bare checkout is reported as an error rather
-than left for git to fail on confusingly.
+`CreateNamespace` batches its checks ahead of any mutation, so the predictable
+failures — a bad name, a duplicate repo name, a branch already taken — arrive
+before anything is written. Cloning and fetching are per-member network
+operations and cannot be batched, so the branch check runs after them, once every
+clone exists.
 
-### Why the clone is synced before every new worktree
+An existing branch is **refused, never adopted** (`-b`, never `-B`): silently
+reusing old work because the name happened to match is worse than failing, and
+`-B` would reset it.
 
-`SyncClone` runs before every `worktree.create`, and exists for two problems
-that share one cause — `git clone --bare` is not a normal clone.
+There is deliberately **no rollback**. If a later member fails, the earlier
+checkouts stay and the error names the directory to delete — with no state file
+recording the intended member list, nothing can tell later that a namespace is
+incomplete. `EnsureClone` is idempotent, so re-running is cheap.
 
-**New work must start from current main.** `worktree.create` can only branch off
-the clone's own `HEAD`, frozen at whatever the *first* clone of that repo
-captured. Left alone, the second and every later worktree for a repo starts from
-an ever-older main, and the merge conflicts grow with it. The round trip is worth
-paying for on each open, and it happens after the branch prompt, so it is not in
-the way of the picker.
+### Why the clone is synced before every new member
 
-**Worktrees must be able to merge main.** `clone --bare` copies remote heads
+`SyncClone` runs before every checkout, for two problems that share one cause —
+`git clone --bare` is not a normal clone.
+
+**New work must start from current main.** A worktree branches off the clone's
+own `HEAD`, frozen at whatever the *first* clone of that repo captured. Left
+alone, every later checkout starts from an ever-older main and the merge
+conflicts grow with it.
+
+**Members must be able to merge main.** `clone --bare` copies remote heads
 straight into `refs/heads/*` and writes no `remote.origin.fetch`, so
-`refs/remotes/origin/*` never exists. In a worktree that means `git merge
-origin/main` and `git rebase origin/main` fail on an unknown revision and
-`git status` has nothing to count ahead/behind against. `SyncClone` configures
-the refspec a normal clone would have had.
+`refs/remotes/origin/*` never exists. In a checkout that means `git merge
+origin/main` fails on an unknown revision and `git status` has nothing to count
+ahead/behind against. `SyncClone` configures the refspec a normal clone would
+have had.
 
 Four details make this less obvious than it looks:
 
@@ -156,11 +267,27 @@ Four details make this less obvious than it looks:
   remote-tracking refs, so skipping it would hand back the one repo that cannot
   merge main.
 
-`--replace-all` on the config write means a clone made before this existed
-converges on its next open rather than staying broken forever.
+A sync failure is a warning, not an error, like the cache refresh: offline or VPN
+down, work started from a stale main still beats no work started.
 
-A sync failure is a warning, not an error, like the cache refresh: offline or
-VPN down, a worktree off a stale main still beats no worktree.
+## Known limitations
+
+- **The agent has no git.** claudebox does not install `git` or `gh`, and a
+  member's `.git` file points at a `gitdir:` under `<root>/clones`, outside the
+  single mounted directory. The agent reads and edits; the human commits. This
+  caps how much of a coupled change the agent can verify for itself — it cannot
+  diff what it has changed across members. Accepted deliberately, to get
+  experience with the design first. Fixing it means either mounting each member's
+  clone at its host path, or making members `git clone --local` copies (hardlinked
+  objects, so a real `.git` directory inside the mount) rather than worktrees.
+- **No teardown.** Namespaces are removed by hand. There is no `clean`: herdr's
+  `worktree.remove` takes a workspace and removes the one checkout backing it, and
+  a namespace's workspace is backed by a directory rather than a checkout, so
+  there is nothing correct for it to remove. A teardown has to understand every
+  member.
+- **No adding a member to a live namespace.** Create a new one.
+- **No multi-repo brief.** The agent starts bare, with no prompt and no merged
+  view of the members' conventions.
 
 ## Platform
 
@@ -168,9 +295,9 @@ macOS only. Don't add cross-platform handling for its own sake.
 
 One thing that looks cross-platform but isn't: config and socket paths resolve
 via `$XDG_CONFIG_HOME` or `~/.config`, **not** `os.UserConfigDir()`. On macOS
-that would return `~/Library/Application Support`, but herdr keeps its own
-config and socket under `~/.config`. We have to find herdr's socket, so we
-follow herdr rather than the Apple convention.
+that would return `~/Library/Application Support`, but herdr keeps its own config
+and socket under `~/.config`. We have to find herdr's socket, so we follow herdr
+rather than the Apple convention.
 
 ## Config
 
@@ -180,7 +307,7 @@ follow herdr rather than the Apple convention.
 orgs: [giantswarm, JosephSalisbury]
 root: ~/.local/share/herdr-pick
 cache_ttl: 6h
-agent: [claude]
+agent: [claudebox]
 include_archived: false
 ```
 
@@ -204,57 +331,49 @@ height = "60%"
 
 ## Managing work
 
-Once you have several worktrees in flight, three commands herd them. All three
-speak to herdr over the socket and share one safety rule: they only ever touch
-workspaces whose checkout lives under `<root>` and is not a clone, so they can
-never close or focus your unrelated herdr work. A workspace is matched to
-herdr-pick by the `checkout_path` herdr reports in `workspace.list`, not by a
-state file.
+Both management commands speak to herdr over the socket and share one safety
+rule: they only ever touch workspaces sitting under `<root>/ns`, so they can never
+focus your unrelated herdr work. A workspace is matched to herdr-pick by its
+pane's working directory, not by a state file.
 
-- **`status`** prints one line per open worktree as `status<TAB>label`, ordered
+- **`status`** prints one line per open namespace as `status<TAB>label`, ordered
   by urgency — the non-interactive glance at what the whole fleet of agents is
   doing. Read-only and pipeable (`herdr-pick status | grep blocked`).
-- **`switch`** lists worktrees with a live agent and focuses the one you pick
-  (`workspace.focus`). "Live" is herdr's own agent status — `working`,
-  `blocked` or `idle`. `blocked` (an agent waiting on you) sorts first, then
-  `working`, then `idle`, so the picker leads with what most wants attention.
-  `--all` widens the list to finished and agent-less worktrees too.
-- **`clean`** removes worktrees whose agent status is `done` (`worktree.remove`,
-  which closes the workspace and deletes the checkout). Without `--force`,
-  herdr refuses a checkout with uncommitted changes, so a stray "done" cannot
-  discard unfinished work. `--dry-run` prints what would go without removing it.
-- **`issue`** takes a GitHub issue (`org/repo#123` or a URL), derives the branch
-  name from it (`<number>-<title-slug>`), opens the worktree, and launches the
-  agent briefed to start on that issue. The brief is a one-line prompt that
-  points the agent at `gh issue view` rather than stuffing the whole issue body
-  through the shell — the agent reads the full issue itself.
+- **`switch`** lists namespaces with a live agent and focuses the one you pick
+  (`workspace.focus`). "Live" is herdr's own agent status — `working`, `blocked`
+  or `idle`. `blocked` (an agent waiting on you) sorts first, then `working`,
+  then `idle`, so the picker leads with what most wants attention. `--all` widens
+  the list to finished and agent-less namespaces too.
 
-`switch` and `clean` lean entirely on herdr's agent-status detection; herdr-pick
-adds no status tracking of its own. "done" cleanup is therefore always about
-*open* workspaces, since a status only exists while a workspace is open.
+Both lean entirely on herdr's agent-status detection; herdr-pick adds no status
+tracking of its own. A status only exists while a workspace is open.
 
 ## Commands
 
-- `pick` — the keybound entry point: candidates, fzf, prompt, open
-- `list` — candidates one per line, for piping
-- `open <org/repo[@branch]>` — resolve a selection without the picker
-- `issue <org/repo#number | url>` — open a worktree for an issue and start on it
-- `status` — one line per open worktree with its agent status, for piping
-- `switch` — fuzzy-pick a worktree with a live agent and focus it (`--all` for every owned worktree)
-- `clean` — remove worktrees whose agent has finished (`--dry-run`, `--force`)
+- `pick` — the keybound entry point: candidates, fzf, resume or create
+- `new <name> <org/repo>...` — create a namespace without the picker
+- `open <name>` — resume a namespace without the picker
+- `list` — one line per namespace as `name<TAB>member,member`, for piping
+- `status` — one line per open namespace with its agent status, for piping
+- `switch` — fuzzy-pick a namespace with a live agent and focus it (`--all`)
 - `refresh` — refill every org cache
 - `ping` — check the herdr socket, independently of the open flow
+
+`new` and `open` are the non-interactive halves of `pick` — the same two verbs
+without fzf or a prompt.
 
 ## Conventions
 
 - `gofmt` enforced, `golangci-lint` with strict rules.
 - TDD. Tests in `_test.go` files alongside the code they test.
-- External commands go through `Executor`; the herdr socket goes through
-  `Herdr`. Both are interfaces so tests never touch the network or a real
-  process. `fakes_test.go` holds the doubles.
+- External commands go through `Executor`; the herdr socket goes through `Herdr`.
+  Both are interfaces so tests never touch the network or a real process.
+  `fakes_test.go` holds the doubles — `fakeExecutor.matches` keys canned replies
+  by argv substring, which is how one fake answers several `git` subcommands
+  differently.
 - Return errors, don't panic. Wrap with context: `fmt.Errorf("doing thing: %w", err)`.
-- Shell out to `git` and `gh` rather than using libraries. The user's own
-  config handles authentication.
+- Shell out to `git` and `gh` rather than using libraries. The user's own config
+  handles authentication.
 - Keep it flat until complexity demands packages.
 - Plain text output, designed for piping.
 
@@ -270,7 +389,8 @@ make check       # all three
 ## Philosophy
 
 - Solo project. Optimise for the author's workflow, not generalisation.
-- The smallest thing that closes the gap herdr leaves. If herdr grows a
-  feature, delete ours.
-- Worktrees are cheap and disposable.
+- The smallest thing that closes the gap herdr leaves. If herdr grows a feature,
+  delete ours — namespaces most of all: they are a herdr concept being prototyped
+  here, and the first place this tool's model is not 1:1 with herdr's.
+- Namespaces are cheap and disposable.
 - Never block the picker on the network.

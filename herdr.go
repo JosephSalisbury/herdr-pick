@@ -112,40 +112,17 @@ func (h *SocketHerdr) Call(ctx context.Context, method string, params, out any) 
 }
 
 // HerdrWorkspace mirrors herdr's WorkspaceInfo.
+//
+// Deliberately no worktree field. A namespace's workspace is created from a
+// directory rather than a checkout, so herdr reports worktree: null for it, and
+// nothing here can rely on it. A workspace is matched back to a namespace by its
+// pane's working directory instead.
 type HerdrWorkspace struct {
-	WorkspaceID string                  `json:"workspace_id"`
-	Label       string                  `json:"label"`
-	Focused     bool                    `json:"focused"`
-	ActiveTabID string                  `json:"active_tab_id"`
-	AgentStatus string                  `json:"agent_status"`
-	Worktree    *HerdrWorkspaceWorktree `json:"worktree"`
-}
-
-// HerdrWorkspaceWorktree mirrors herdr's WorkspaceWorktreeInfo. CheckoutPath is
-// how a workspace is matched back to a herdr-pick worktree on disk.
-type HerdrWorkspaceWorktree struct {
-	CheckoutPath string `json:"checkout_path"`
-	RepoName     string `json:"repo_name"`
-}
-
-// HerdrWorktree mirrors herdr's WorktreeInfo.
-type HerdrWorktree struct {
-	Path             string  `json:"path"`
-	Label            string  `json:"label"`
-	Branch           *string `json:"branch"`
-	IsBare           bool    `json:"is_bare"`
-	IsDetached       bool    `json:"is_detached"`
-	IsPrunable       bool    `json:"is_prunable"`
-	IsLinkedWorktree bool    `json:"is_linked_worktree"`
-	OpenWorkspaceID  *string `json:"open_workspace_id"`
-}
-
-// worktreeResult covers the worktree_created and worktree_opened replies,
-// which share a workspace/worktree pair.
-type worktreeResult struct {
-	Workspace   HerdrWorkspace `json:"workspace"`
-	Worktree    HerdrWorktree  `json:"worktree"`
-	AlreadyOpen bool           `json:"already_open"`
+	WorkspaceID string `json:"workspace_id"`
+	Label       string `json:"label"`
+	Focused     bool   `json:"focused"`
+	ActiveTabID string `json:"active_tab_id"`
+	AgentStatus string `json:"agent_status"`
 }
 
 // Ping verifies the socket is live and speaking the expected protocol.
@@ -162,40 +139,33 @@ func Ping(ctx context.Context, h Herdr) error {
 	return nil
 }
 
-// WorktreeCreate creates a checkout and returns the workspace herdr opened.
-func WorktreeCreate(ctx context.Context, h Herdr, cwd, branch, path, label string) (HerdrWorkspace, error) {
+// WorkspaceCreate opens a directory as a workspace and returns it with its root
+// pane, saving a pane.list on the create path.
+//
+// This is the only way herdr-pick opens a workspace, and it is why none of
+// herdr's worktree.* methods are used at all. worktree.open refuses a checkout
+// whose clone is not its neighbour ("New and open worktree actions start from the
+// repo parent workspace", linked_worktree_source) — and it would be the wrong
+// call anyway: a namespace is a directory of checkouts, not one checkout, and
+// creating each member through herdr would open one workspace per member when
+// the whole point is one workspace over all of them.
+func WorkspaceCreate(ctx context.Context, h Herdr, cwd, label string) (HerdrWorkspace, HerdrPane, error) {
 	params := map[string]any{
-		"cwd":    cwd,
-		"branch": branch,
-		"path":   path,
-		"label":  label,
-		"focus":  true,
-	}
-	var result worktreeResult
-	if err := h.Call(ctx, "worktree.create", params, &result); err != nil {
-		return HerdrWorkspace{}, err
-	}
-	if result.Workspace.WorkspaceID == "" {
-		return HerdrWorkspace{}, fmt.Errorf("herdr created worktree %s without a workspace", path)
-	}
-	return result.Workspace, nil
-}
-
-// WorktreeOpen opens an existing checkout, focusing it. It is idempotent:
-// herdr reports an already-open worktree rather than failing.
-func WorktreeOpen(ctx context.Context, h Herdr, path string) (HerdrWorkspace, error) {
-	params := map[string]any{
-		"path":  path,
+		"cwd":   cwd,
+		"label": label,
 		"focus": true,
 	}
-	var result worktreeResult
-	if err := h.Call(ctx, "worktree.open", params, &result); err != nil {
-		return HerdrWorkspace{}, err
+	var result struct {
+		Workspace HerdrWorkspace `json:"workspace"`
+		RootPane  HerdrPane      `json:"root_pane"`
+	}
+	if err := h.Call(ctx, "workspace.create", params, &result); err != nil {
+		return HerdrWorkspace{}, HerdrPane{}, err
 	}
 	if result.Workspace.WorkspaceID == "" {
-		return HerdrWorkspace{}, fmt.Errorf("herdr opened worktree %s without a workspace", path)
+		return HerdrWorkspace{}, HerdrPane{}, fmt.Errorf("herdr created no workspace for %s", cwd)
 	}
-	return result.Workspace, nil
+	return result.Workspace, result.RootPane, nil
 }
 
 // WorkspaceList returns every workspace herdr currently has open. It is the
@@ -216,35 +186,40 @@ func WorkspaceFocus(ctx context.Context, h Herdr, workspaceID string) error {
 	return h.Call(ctx, "workspace.focus", map[string]any{"workspace_id": workspaceID}, nil)
 }
 
-// WorktreeRemove removes the worktree backing a workspace and closes it,
-// returning the path herdr removed. Without force, herdr refuses a checkout
-// with uncommitted changes rather than discarding work.
-func WorktreeRemove(ctx context.Context, h Herdr, workspaceID string, force bool) (string, error) {
-	params := map[string]any{
-		"workspace_id": workspaceID,
-		"force":        force,
-	}
-	var result struct {
-		Path string `json:"path"`
-	}
-	if err := h.Call(ctx, "worktree.remove", params, &result); err != nil {
-		return "", err
-	}
-	return result.Path, nil
-}
-
 // HerdrPane mirrors the fields of herdr's PaneInfo that we use.
+//
+// Cwd is how a workspace is matched back to a namespace. A directory-backed
+// workspace has no worktree for herdr to report, and WorkspaceInfo carries no
+// path of its own, so the pane's working directory is the only thing tying a
+// workspace to a place on disk.
 type HerdrPane struct {
-	PaneID  string `json:"pane_id"`
-	Focused bool   `json:"focused"`
+	PaneID        string `json:"pane_id"`
+	WorkspaceID   string `json:"workspace_id"`
+	Focused       bool   `json:"focused"`
+	Cwd           string `json:"cwd"`
+	ForegroundCwd string `json:"foreground_cwd"`
 }
 
-// PaneList returns the panes belonging to a workspace.
+// Dir returns the pane's working directory, preferring the shell's own over the
+// foreground process's.
+func (p HerdrPane) Dir() string {
+	if p.Cwd != "" {
+		return p.Cwd
+	}
+	return p.ForegroundCwd
+}
+
+// PaneList returns the panes belonging to a workspace, or every pane in the
+// session when workspaceID is empty. Listing all of them in one call is what
+// keeps matching workspaces to namespaces to a single round trip.
 func PaneList(ctx context.Context, h Herdr, workspaceID string) ([]HerdrPane, error) {
 	var result struct {
 		Panes []HerdrPane `json:"panes"`
 	}
-	params := map[string]any{"workspace_id": workspaceID}
+	params := map[string]any{}
+	if workspaceID != "" {
+		params["workspace_id"] = workspaceID
+	}
 	if err := h.Call(ctx, "pane.list", params, &result); err != nil {
 		return nil, err
 	}
@@ -252,7 +227,7 @@ func PaneList(ctx context.Context, h Herdr, workspaceID string) ([]HerdrPane, er
 }
 
 // RootPane picks the pane to run the agent in: the focused one, else the only
-// one. worktree.create yields a single-pane workspace and we deliberately do
+// one. workspace.create yields a single-pane workspace and we deliberately do
 // not add a second.
 func RootPane(panes []HerdrPane) (string, error) {
 	if len(panes) == 0 {

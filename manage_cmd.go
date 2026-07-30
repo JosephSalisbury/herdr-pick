@@ -21,62 +21,26 @@ func connectHerdr(ctx context.Context) (Herdr, error) {
 	return herdr, nil
 }
 
-var (
-	cleanForce  bool
-	cleanDryRun bool
-)
-
-var cleanCmd = &cobra.Command{
-	Use:   "clean",
-	Short: "Remove worktrees whose agent has finished",
-	Long: "Removes every herdr-pick worktree whose agent reports it is done, " +
-		"closing the workspace and deleting the checkout. Only worktrees " +
-		"herdr-pick created are touched. A checkout with uncommitted changes " +
-		"is kept unless --force is given.",
-	RunE: func(cmd *cobra.Command, _ []string) error {
-		_, root, err := loadConfig()
-		if err != nil {
-			return err
-		}
-		herdr, err := connectHerdr(cmd.Context())
-		if err != nil {
-			return err
-		}
-
-		if cleanDryRun {
-			workspaces, err := WorkspaceList(cmd.Context(), herdr)
-			if err != nil {
-				return err
-			}
-			done := DoneWorkspaces(root, workspaces)
-			if len(done) == 0 {
-				fmt.Fprintln(os.Stderr, "no done worktrees")
-				return nil
-			}
-			for _, ws := range done {
-				fmt.Println(ws.Worktree.CheckoutPath)
-			}
-			return nil
-		}
-
-		removed, err := CleanDone(cmd.Context(), herdr, root, cleanForce)
-		for _, path := range removed {
-			fmt.Println(path)
-		}
-		if err != nil {
-			return err
-		}
-		if len(removed) == 0 {
-			fmt.Fprintln(os.Stderr, "no done worktrees")
-		}
-		return nil
-	},
+// listWorkspacesAndPanes fetches what the management commands both need: the
+// workspaces, and every pane in the session so each workspace can be located on
+// disk. Two calls, because a directory-backed workspace carries no path of its
+// own for herdr to report.
+func listWorkspacesAndPanes(ctx context.Context, h Herdr) ([]HerdrWorkspace, []HerdrPane, error) {
+	workspaces, err := WorkspaceList(ctx, h)
+	if err != nil {
+		return nil, nil, err
+	}
+	panes, err := PaneList(ctx, h, "")
+	if err != nil {
+		return nil, nil, err
+	}
+	return workspaces, panes, nil
 }
 
 var statusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Show every herdr-pick worktree and its agent status",
-	Long: "Prints one line per open herdr-pick worktree as `status<TAB>label`, " +
+	Short: "Show every open namespace and its agent status",
+	Long: "Prints one line per open namespace as `status<TAB>label`, " +
 		"ordered by urgency (blocked, working, idle, done). Read-only and " +
 		"pipeable — a glance at what every agent is doing.",
 	RunE: func(cmd *cobra.Command, _ []string) error {
@@ -89,13 +53,13 @@ var statusCmd = &cobra.Command{
 			return err
 		}
 
-		workspaces, err := WorkspaceList(cmd.Context(), herdr)
+		workspaces, panes, err := listWorkspacesAndPanes(cmd.Context(), herdr)
 		if err != nil {
 			return err
 		}
-		owned := StatusWorkspaces(root, workspaces)
+		owned := StatusWorkspaces(root, workspaces, panes)
 		if len(owned) == 0 {
-			fmt.Fprintln(os.Stderr, "no open worktrees")
+			fmt.Fprintln(os.Stderr, "no open namespaces")
 			return nil
 		}
 		for _, ws := range owned {
@@ -110,9 +74,9 @@ var switchAll bool
 var switchCmd = &cobra.Command{
 	Use:     "switch",
 	Aliases: []string{"active"},
-	Short:   "Switch to a worktree with a running agent",
-	Long: "Lists herdr-pick worktrees with an agent still in flight and focuses " +
-		"the one you pick. --all includes finished and agent-less worktrees too.",
+	Short:   "Switch to a namespace with a running agent",
+	Long: "Lists namespaces with an agent still in flight and focuses " +
+		"the one you pick. --all includes finished and agent-less namespaces too.",
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		_, root, err := loadConfig()
 		if err != nil {
@@ -123,13 +87,13 @@ var switchCmd = &cobra.Command{
 			return err
 		}
 
-		workspaces, err := WorkspaceList(cmd.Context(), herdr)
+		workspaces, panes, err := listWorkspacesAndPanes(cmd.Context(), herdr)
 		if err != nil {
 			return err
 		}
-		candidates := SwitchCandidates(root, workspaces, switchAll)
+		candidates := SwitchCandidates(root, workspaces, panes, switchAll)
 		if len(candidates) == 0 {
-			fmt.Fprintln(os.Stderr, "no active worktrees")
+			fmt.Fprintln(os.Stderr, "no active namespaces")
 			return nil
 		}
 
@@ -167,8 +131,6 @@ func switchLines(workspaces []HerdrWorkspace) ([]string, map[string]string) {
 }
 
 func init() {
-	cleanCmd.Flags().BoolVar(&cleanForce, "force", false, "remove even with uncommitted changes")
-	cleanCmd.Flags().BoolVar(&cleanDryRun, "dry-run", false, "list what would be removed without removing it")
-	switchCmd.Flags().BoolVar(&switchAll, "all", false, "include finished and agent-less worktrees")
-	rootCmd.AddCommand(cleanCmd, switchCmd, statusCmd)
+	switchCmd.Flags().BoolVar(&switchAll, "all", false, "include finished and agent-less namespaces")
+	rootCmd.AddCommand(switchCmd, statusCmd)
 }

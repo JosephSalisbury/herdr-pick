@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 
@@ -103,22 +104,25 @@ func maybeRefresh(cfg Config, root string) error {
 
 var listCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List picker candidates, one per line",
+	Short: "List namespaces and their members, one per line",
+	Long: "Prints one line per namespace as `name<TAB>member,member`. Read-only " +
+		"and pipeable, and unlike status it does not need herdr to be running.",
 	RunE: func(_ *cobra.Command, _ []string) error {
-		cfg, root, err := loadConfig()
+		_, root, err := loadConfig()
 		if err != nil {
 			return err
-		}
-		if err := maybeRefresh(cfg, root); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 		}
 
-		candidates, err := BuildCandidates(root, cfg.Orgs)
+		namespaces, err := DiscoverNamespaces(root)
 		if err != nil {
 			return err
 		}
-		for _, c := range candidates {
-			fmt.Println(c.String())
+		if len(namespaces) == 0 {
+			fmt.Fprintln(os.Stderr, "no namespaces")
+			return nil
+		}
+		for _, ns := range namespaces {
+			fmt.Printf("%s\t%s\n", ns.Name, strings.Join(ns.Members, ","))
 		}
 		return nil
 	},
@@ -155,35 +159,67 @@ var pingCmd = &cobra.Command{
 	},
 }
 
-var openBranch string
+// newCmd and openCmd are the non-interactive halves of pick: the same two verbs
+// without fzf or a prompt, for scripting.
+
+var newCmd = &cobra.Command{
+	Use:   "new <name> <org/repo>...",
+	Short: "Create a namespace over one or more repositories and start an agent",
+	Long: "Checks out every named repository on a branch named after the namespace, " +
+		"opens it as one herdr workspace and starts the agent over all of them.",
+	Args: cobra.MinimumNArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, root, err := loadConfig()
+		if err != nil {
+			return err
+		}
+
+		name := args[0]
+		members := make([]RepoRef, 0, len(args)-1)
+		for _, arg := range args[1:] {
+			ref, err := ParseRepo(arg)
+			if err != nil {
+				return err
+			}
+			members = append(members, ref)
+		}
+
+		// Checked before any clone or checkout, so a dead socket costs nothing.
+		herdr, err := connectHerdr(cmd.Context())
+		if err != nil {
+			return err
+		}
+
+		ns, err := CreateNamespace(cmd.Context(), &DefaultExecutor{}, root, name, members)
+		if err != nil {
+			return err
+		}
+		return openAndReport(cmd.Context(), herdr, cfg, ns)
+	},
+}
 
 var openCmd = &cobra.Command{
-	Use:   "open <org/repo[@branch]>",
-	Short: "Open a selection as a herdr workspace",
+	Use:   "open <name>",
+	Short: "Resume an existing namespace",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, root, err := loadConfig()
 		if err != nil {
 			return err
 		}
-		herdr, err := NewSocketHerdr()
-		if err != nil {
-			return err
-		}
-		if err := Ping(cmd.Context(), herdr); err != nil {
-			return err
-		}
 
-		path, err := Open(cmd.Context(), &DefaultExecutor{}, herdr, cfg, root, args[0], openBranch)
+		ns, err := LoadNamespace(root, args[0])
 		if err != nil {
 			return err
 		}
-		fmt.Println(path)
-		return nil
+		herdr, err := connectHerdr(cmd.Context())
+		if err != nil {
+			return err
+		}
+		return openAndReport(cmd.Context(), herdr, cfg, ns)
 	},
 }
 
 func init() {
-	openCmd.Flags().StringVar(&openBranch, "branch", "", "branch name (generated if not given)")
-	rootCmd.AddCommand(listCmd, refreshCmd, openCmd, pickCmd, pingCmd)
+	rootCmd.AddCommand(listCmd, refreshCmd, newCmd, openCmd, pickCmd, pingCmd)
 }

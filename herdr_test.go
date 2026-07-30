@@ -6,64 +6,85 @@ import (
 	"testing"
 )
 
-func TestWorktreeCreateSendsExpectedParams(t *testing.T) {
+func TestWorkspaceCreateSendsCwdAndLabel(t *testing.T) {
 	herdr := &fakeHerdr{results: map[string]string{
-		"worktree.create": `{"type":"worktree_created","workspace":{"workspace_id":"w7","label":"x"},"worktree":{"path":"/wt","label":"x"}}`,
+		"workspace.create": `{"type":"workspace_created","workspace":{"workspace_id":"w1","label":"add-foo"},
+			"root_pane":{"pane_id":"p1","workspace_id":"w1","focused":true,"cwd":"/ns/add-foo"}}`,
 	}}
 
-	ws, err := WorktreeCreate(context.Background(), herdr, "/clone", "swift-owlbear", "/wt", "org/repo@swift-owlbear")
+	ws, root, err := WorkspaceCreate(context.Background(), herdr, "/ns/add-foo", "add-foo")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if ws.WorkspaceID != "w7" {
-		t.Fatalf("got workspace %q, want w7", ws.WorkspaceID)
+	if ws.WorkspaceID != "w1" || ws.Label != "add-foo" {
+		t.Fatalf("got %+v", ws)
+	}
+	// The root pane comes back with the workspace, so the create path needs no
+	// pane.list.
+	if root.PaneID != "p1" {
+		t.Fatalf("got root pane %+v", root)
 	}
 
-	params := herdr.paramsFor("worktree.create")
-	for key, want := range map[string]string{
-		"cwd":    "/clone",
-		"branch": "swift-owlbear",
-		"path":   "/wt",
-	} {
-		if got, _ := params[key].(string); got != want {
-			t.Fatalf("param %s: got %q, want %q", key, got, want)
-		}
+	params := herdr.paramsFor("workspace.create")
+	if got, _ := params["cwd"].(string); got != "/ns/add-foo" {
+		t.Fatalf("got cwd %q", got)
 	}
-}
-
-// The response carries no pane id, so a missing workspace id is fatal rather
-// than something to paper over.
-func TestWorktreeCreateRequiresWorkspaceID(t *testing.T) {
-	herdr := &fakeHerdr{results: map[string]string{
-		"worktree.create": `{"type":"worktree_created","worktree":{"path":"/wt","label":"x"}}`,
-	}}
-
-	if _, err := WorktreeCreate(context.Background(), herdr, "/clone", "b", "/wt", "l"); err == nil {
-		t.Fatal("expected error, got nil")
+	if got, _ := params["label"].(string); got != "add-foo" {
+		t.Fatalf("got label %q", got)
 	}
-}
-
-func TestWorktreeCreatePropagatesError(t *testing.T) {
-	herdr := &fakeHerdr{err: errors.New("socket down")}
-	if _, err := WorktreeCreate(context.Background(), herdr, "/clone", "b", "/wt", "l"); err == nil {
-		t.Fatal("expected error, got nil")
-	}
-}
-
-func TestWorktreeOpenFocuses(t *testing.T) {
-	herdr := &fakeHerdr{results: map[string]string{
-		"worktree.open": `{"type":"worktree_opened","already_open":true,"workspace":{"workspace_id":"w1"},"worktree":{"path":"/wt","label":"x"}}`,
-	}}
-
-	ws, err := WorktreeOpen(context.Background(), herdr, "/wt")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if ws.WorkspaceID != "w1" {
-		t.Fatalf("got %q, want w1", ws.WorkspaceID)
-	}
-	if focus, _ := herdr.paramsFor("worktree.open")["focus"].(bool); !focus {
+	if focus, _ := params["focus"].(bool); !focus {
 		t.Fatal("expected focus to be requested")
+	}
+}
+
+// A workspace we cannot address is fatal rather than something to paper over.
+func TestWorkspaceCreateRequiresWorkspaceID(t *testing.T) {
+	herdr := &fakeHerdr{results: map[string]string{
+		"workspace.create": `{"type":"workspace_created","root_pane":{"pane_id":"p1"}}`,
+	}}
+
+	if _, _, err := WorkspaceCreate(context.Background(), herdr, "/ns/x", "x"); err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+func TestWorkspaceCreatePropagatesError(t *testing.T) {
+	herdr := &fakeHerdr{err: errors.New("socket down")}
+	if _, _, err := WorkspaceCreate(context.Background(), herdr, "/ns/x", "x"); err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+// An empty workspace id means "every pane in the session", which is what lets one
+// call locate every workspace on disk.
+func TestPaneListOmitsWorkspaceWhenListingAll(t *testing.T) {
+	herdr := &fakeHerdr{results: map[string]string{
+		"pane.list": `{"type":"pane_list","panes":[{"pane_id":"p1","workspace_id":"w1","cwd":"/ns/a"}]}`,
+	}}
+
+	panes, err := PaneList(context.Background(), herdr, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(panes) != 1 || panes[0].WorkspaceID != "w1" || panes[0].Dir() != "/ns/a" {
+		t.Fatalf("got %+v", panes)
+	}
+	if _, ok := herdr.paramsFor("pane.list")["workspace_id"]; ok {
+		t.Fatal("workspace_id should be omitted when listing every pane")
+	}
+}
+
+// The shell's own cwd is preferred, but a pane running an agent may only report
+// the foreground process's.
+func TestPaneDirPrefersShellCwd(t *testing.T) {
+	if got := (HerdrPane{Cwd: "/a", ForegroundCwd: "/b"}).Dir(); got != "/a" {
+		t.Fatalf("got %q, want /a", got)
+	}
+	if got := (HerdrPane{ForegroundCwd: "/b"}).Dir(); got != "/b" {
+		t.Fatalf("got %q, want /b", got)
+	}
+	if got := (HerdrPane{}).Dir(); got != "" {
+		t.Fatalf("got %q, want empty", got)
 	}
 }
 
@@ -125,11 +146,13 @@ func TestRunInPaneSendsTextAndEnter(t *testing.T) {
 	}
 }
 
-func TestWorkspaceListParsesWorktree(t *testing.T) {
+// A namespace's workspace is directory-backed, so herdr reports worktree: null
+// for it. Parsing must not depend on that field being present.
+func TestWorkspaceListParsesWithoutWorktree(t *testing.T) {
 	herdr := &fakeHerdr{results: map[string]string{
 		"workspace.list": `{"type":"workspace_list","workspaces":[
-			{"workspace_id":"w1","label":"org/repo@a","agent_status":"working","worktree":{"checkout_path":"/wt/a"}},
-			{"workspace_id":"w2","label":"other","agent_status":"idle"}
+			{"workspace_id":"w1","label":"add-foo","agent_status":"working","worktree":null},
+			{"workspace_id":"w2","label":"other","agent_status":"idle","worktree":{"checkout_path":"/wt/a"}}
 		]}`,
 	}}
 
@@ -140,14 +163,12 @@ func TestWorkspaceListParsesWorktree(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("got %d workspaces, want 2", len(got))
 	}
-	if got[0].Worktree == nil || got[0].Worktree.CheckoutPath != "/wt/a" {
-		t.Fatalf("got worktree %+v", got[0].Worktree)
+	if got[0].Label != "add-foo" || got[0].AgentStatus != AgentWorking {
+		t.Fatalf("got %+v", got[0])
 	}
-	if got[0].AgentStatus != AgentWorking {
-		t.Fatalf("got status %q", got[0].AgentStatus)
-	}
-	if got[1].Worktree != nil {
-		t.Fatalf("expected no worktree for w2, got %+v", got[1].Worktree)
+	// A worktree herdr does report is simply ignored.
+	if got[1].Label != "other" {
+		t.Fatalf("got %+v", got[1])
 	}
 }
 
@@ -158,34 +179,6 @@ func TestWorkspaceFocusTargetsWorkspace(t *testing.T) {
 	}
 	if got, _ := herdr.paramsFor("workspace.focus")["workspace_id"].(string); got != "w9" {
 		t.Fatalf("got workspace_id %q, want w9", got)
-	}
-}
-
-func TestWorktreeRemovePassesForce(t *testing.T) {
-	herdr := &fakeHerdr{results: map[string]string{
-		"worktree.remove": `{"type":"worktree_removed","path":"/wt/a","workspace_id":"w1","forced":true}`,
-	}}
-
-	path, err := WorktreeRemove(context.Background(), herdr, "w1", true)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if path != "/wt/a" {
-		t.Fatalf("got path %q, want /wt/a", path)
-	}
-	params := herdr.paramsFor("worktree.remove")
-	if got, _ := params["workspace_id"].(string); got != "w1" {
-		t.Fatalf("got workspace_id %q, want w1", got)
-	}
-	if force, _ := params["force"].(bool); !force {
-		t.Fatal("expected force to be passed")
-	}
-}
-
-func TestWorktreeRemovePropagatesError(t *testing.T) {
-	herdr := &fakeHerdr{err: errors.New("dirty tree")}
-	if _, err := WorktreeRemove(context.Background(), herdr, "w1", false); err == nil {
-		t.Fatal("expected error, got nil")
 	}
 }
 

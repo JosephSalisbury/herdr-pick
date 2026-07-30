@@ -1,35 +1,24 @@
 package main
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
 )
 
-// OwnsWorktree reports whether a checkout path is one herdr-pick created — it
-// lives under <root>. Cleanup and switching only ever touch our own workspaces,
-// never the user's other herdr work.
+// OwnsPath reports whether a working directory is one herdr-pick made, so
+// switching only ever touches our own workspaces and never the user's other herdr
+// work.
 //
-// Everything under <root> is ours except the clones, which are worktree sources
-// and never workspaces. Excluding those is what keeps this meaning "a checkout"
-// now that a repo and its checkouts share a directory.
-func OwnsWorktree(root, checkoutPath string) bool {
-	if checkoutPath == "" {
+// Every namespace lives under one root, so this is a single containment check.
+// Clones have their own root and are worktree sources rather than workspaces, so
+// they fall outside without needing to be excluded by name.
+func OwnsPath(root, dir string) bool {
+	if dir == "" {
 		return false
 	}
-	path := filepath.Clean(checkoutPath)
-	if !withinDir(root, path) {
-		return false
-	}
-	for _, part := range strings.Split(path, string(filepath.Separator)) {
-		if part == bareDir {
-			return false
-		}
-	}
-	return true
+	return withinDir(NamespaceRoot(root), filepath.Clean(dir))
 }
 
 // withinDir reports whether path is strictly inside dir, comparing whole path
@@ -38,12 +27,24 @@ func withinDir(dir, path string) bool {
 	return strings.HasPrefix(filepath.Clean(path), filepath.Clean(dir)+string(filepath.Separator))
 }
 
-// OwnedWorkspaces filters a workspace list down to the ones backed by a
-// herdr-pick worktree.
-func OwnedWorkspaces(root string, workspaces []HerdrWorkspace) []HerdrWorkspace {
+// OwnedWorkspaces filters a workspace list down to the ones sitting in a
+// namespace, using the panes to locate each workspace on disk.
+//
+// Matched by pane working directory rather than by herdr's checkout_path: a
+// namespace's workspace is created from a directory, so herdr reports no worktree
+// for it and WorkspaceInfo carries no path of its own. It is still matched by
+// where it is rather than by a state file.
+func OwnedWorkspaces(root string, workspaces []HerdrWorkspace, panes []HerdrPane) []HerdrWorkspace {
+	owned := make(map[string]bool, len(panes))
+	for _, p := range panes {
+		if OwnsPath(root, p.Dir()) {
+			owned[p.WorkspaceID] = true
+		}
+	}
+
 	var out []HerdrWorkspace
 	for _, ws := range workspaces {
-		if ws.Worktree != nil && OwnsWorktree(root, ws.Worktree.CheckoutPath) {
+		if owned[ws.WorkspaceID] {
 			out = append(out, ws)
 		}
 	}
@@ -91,36 +92,21 @@ func sortWorkspaces(workspaces []HerdrWorkspace) {
 	})
 }
 
-// workspaceLabel is the human name for a workspace, falling back to the
-// checkout path when herdr has no label for it.
+// workspaceLabel is the human name for a workspace. workspace.create is given the
+// namespace name as its label, so this is normally just that.
 func workspaceLabel(ws HerdrWorkspace) string {
 	if ws.Label != "" {
 		return ws.Label
 	}
-	if ws.Worktree != nil {
-		return ws.Worktree.CheckoutPath
-	}
 	return ws.WorkspaceID
 }
 
-// DoneWorkspaces returns the herdr-pick workspaces whose agent has finished.
-func DoneWorkspaces(root string, workspaces []HerdrWorkspace) []HerdrWorkspace {
+// SwitchCandidates returns the namespaces worth switching to, ordered by urgency.
+// By default only active work is listed; all includes finished and agent-less
+// workspaces too.
+func SwitchCandidates(root string, workspaces []HerdrWorkspace, panes []HerdrPane, all bool) []HerdrWorkspace {
 	var out []HerdrWorkspace
-	for _, ws := range OwnedWorkspaces(root, workspaces) {
-		if ws.AgentStatus == AgentDone {
-			out = append(out, ws)
-		}
-	}
-	sortWorkspaces(out)
-	return out
-}
-
-// SwitchCandidates returns the herdr-pick workspaces worth switching to,
-// ordered by urgency. By default only active work is listed; all includes
-// finished and agent-less workspaces too.
-func SwitchCandidates(root string, workspaces []HerdrWorkspace, all bool) []HerdrWorkspace {
-	var out []HerdrWorkspace
-	for _, ws := range OwnedWorkspaces(root, workspaces) {
+	for _, ws := range OwnedWorkspaces(root, workspaces, panes) {
 		if all || activeStatus(ws.AgentStatus) {
 			out = append(out, ws)
 		}
@@ -129,10 +115,10 @@ func SwitchCandidates(root string, workspaces []HerdrWorkspace, all bool) []Herd
 	return out
 }
 
-// StatusWorkspaces returns every herdr-pick worktree herdr has open, ordered
-// by urgency, for a glanceable overview of what the fleet of agents is doing.
-func StatusWorkspaces(root string, workspaces []HerdrWorkspace) []HerdrWorkspace {
-	out := OwnedWorkspaces(root, workspaces)
+// StatusWorkspaces returns every open namespace, ordered by urgency, for a
+// glanceable overview of what the fleet of agents is doing.
+func StatusWorkspaces(root string, workspaces []HerdrWorkspace, panes []HerdrPane) []HerdrWorkspace {
+	out := OwnedWorkspaces(root, workspaces, panes)
 	sortWorkspaces(out)
 	return out
 }
@@ -143,27 +129,8 @@ func statusLine(ws HerdrWorkspace) string {
 	return fmt.Sprintf("%s\t%s", ws.AgentStatus, workspaceLabel(ws))
 }
 
-// CleanDone removes every herdr-pick worktree whose agent has finished,
-// returning the paths removed. It never touches workspaces herdr-pick does not
-// own, and — unless force is set — lets herdr refuse a checkout with
-// uncommitted changes so unfinished work survives a stray "done".
-func CleanDone(ctx context.Context, h Herdr, root string, force bool) ([]string, error) {
-	workspaces, err := WorkspaceList(ctx, h)
-	if err != nil {
-		return nil, err
-	}
-
-	var (
-		removed []string
-		errs    []error
-	)
-	for _, ws := range DoneWorkspaces(root, workspaces) {
-		path, err := WorktreeRemove(ctx, h, ws.WorkspaceID, force)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("removing %s: %w", workspaceLabel(ws), err))
-			continue
-		}
-		removed = append(removed, path)
-	}
-	return removed, errors.Join(errs...)
-}
+// There is deliberately no cleanup here. herdr's worktree.remove takes a
+// workspace and removes the one checkout backing it, and a namespace's workspace
+// is backed by a directory rather than a checkout — so there is nothing correct
+// for it to remove. A teardown has to understand every member, and until it
+// exists namespaces are removed by hand.

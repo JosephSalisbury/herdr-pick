@@ -24,7 +24,8 @@ prefix+o  →  herdr-pick pick
                 ├─ fzf
                 ├─ existing worktree  →  worktree.open (focus)
                 └─ bare repo          →  prompt branch (default: generated name)
-                                      →  git clone if absent, else fetch main
+                                      →  git clone if absent
+                                      →  sync clone (fetch main + origin/* refs)
                                       →  worktree.create
                                       →  agent.start in the new workspace
 ```
@@ -104,25 +105,46 @@ source. A bare clone has no working tree, so there is nothing to open.
 `.git` directory. A leftover non-bare checkout is reported as an error rather
 than left for git to fail on confusingly.
 
-### Why the clone is fetched before every new worktree
+### Why the clone is synced before every new worktree
 
-A bare clone has no remote-tracking refs, so `worktree.create` can only branch
-off the clone's own `HEAD` — frozen at whatever the *first* clone of that repo
-captured. Left alone, the second and every later worktree for a repo starts
-from an ever-older main, and the merge conflicts grow with it. So
-`FetchDefaultBranch` runs first on a clone that was already on disk (a clone we
-just made is current, and re-fetching it wastes a round trip on the slowest
-path there is).
+`SyncClone` runs before every `worktree.create`, and exists for two problems
+that share one cause — `git clone --bare` is not a normal clone.
 
-Only the branch `HEAD` points at is fetched, forced (`+main:main`):
+**New work must start from current main.** `worktree.create` can only branch off
+the clone's own `HEAD`, frozen at whatever the *first* clone of that repo
+captured. Left alone, the second and every later worktree for a repo starts from
+an ever-older main, and the merge conflicts grow with it. The round trip is worth
+paying for on each open, and it happens after the branch prompt, so it is not in
+the way of the picker.
 
-- Forced, because a rewritten main — force-push, squashed merge — would
+**Worktrees must be able to merge main.** `clone --bare` copies remote heads
+straight into `refs/heads/*` and writes no `remote.origin.fetch`, so
+`refs/remotes/origin/*` never exists. In a worktree that means `git merge
+origin/main` and `git rebase origin/main` fail on an unknown revision and
+`git status` has nothing to count ahead/behind against. `SyncClone` configures
+the refspec a normal clone would have had.
+
+Four details make this less obvious than it looks:
+
+- The refspec is *configured* (`remote.origin.fetch`) so the user's own later
+  `git fetch` behaves normally, and also *passed explicitly* to our fetch,
+  because an explicit refspec overrides the configured one and we need both
+  namespaces updated in a single round trip.
+- The `refs/heads` half is scoped to the branch `HEAD` points at. A wildcard
+  `+refs/heads/*:refs/heads/*` fails on any branch already checked out in a
+  worktree, which here is most of them.
+- Both halves are forced. A rewritten main — force-push, squashed merge — would
   otherwise be rejected and leave the stale ref. Overwriting is safe here; the
   clone is a worktree source and is never committed into.
-- Only that one branch, because `+refs/heads/*:refs/heads/*` fails on any branch
-  already checked out in a worktree, which here is most of them.
+- Fresh clones are synced too. They are current commit-wise, so this looks like a
+  wasted round trip on the slowest path there is — but `clone --bare` leaves no
+  remote-tracking refs, so skipping it would hand back the one repo that cannot
+  merge main.
 
-A fetch failure is a warning, not an error, like the cache refresh: offline or
+`--replace-all` on the config write means a clone made before this existed
+converges on its next open rather than staying broken forever.
+
+A sync failure is a warning, not an error, like the cache refresh: offline or
 VPN down, a worktree off a stale main still beats no worktree.
 
 ## Platform

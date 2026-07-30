@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -22,12 +23,8 @@ func TestEnsureCloneClonesBareWhenAbsent(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "repos", "giantswarm", "foo")
 	executor := &fakeExecutor{}
 
-	cloned, err := EnsureClone(context.Background(), executor, "giantswarm", "foo", dir)
-	if err != nil {
+	if err := EnsureClone(context.Background(), executor, "giantswarm", "foo", dir); err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if !cloned {
-		t.Fatal("expected a fresh clone to be reported")
 	}
 	// Bare is what stops herdr opening the clone as a stray main workspace.
 	if !executor.ran("git", "clone", "--bare", "git@github.com:giantswarm/foo.git", dir) {
@@ -35,21 +32,65 @@ func TestEnsureCloneClonesBareWhenAbsent(t *testing.T) {
 	}
 }
 
+// EnsureClone itself never touches an existing clone: bringing it up to date is
+// SyncClone's job, because that is the part allowed to fail with a warning.
 func TestEnsureCloneSkipsExistingBareClone(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "clone")
 	writeBareClone(t, dir)
 	executor := &fakeExecutor{}
 
-	cloned, err := EnsureClone(context.Background(), executor, "giantswarm", "foo", dir)
-	if err != nil {
+	if err := EnsureClone(context.Background(), executor, "giantswarm", "foo", dir); err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if cloned {
-		t.Fatal("expected an existing clone not to be reported as fresh")
 	}
 	if len(executor.calls) != 0 {
 		t.Fatalf("expected no commands, got %v", executor.calls)
 	}
+}
+
+func TestSyncCloneConfiguresRemoteTrackingRefspec(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "clone")
+	executor := &fakeExecutor{outputs: map[string]string{"git": "trunk\n"}}
+
+	if err := SyncClone(context.Background(), executor, dir); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Without this the worktrees have no origin/* at all, so merging main is
+	// impossible however current refs/heads/main is.
+	if !executor.ran("git", "-C", dir, "config", "--replace-all", "remote.origin.fetch", originRefspec) {
+		t.Fatalf("expected the origin refspec to be configured, got %v", executor.calls)
+	}
+}
+
+// One fetch, both namespaces: remote-tracking refs for the user's merges, and
+// the default branch itself because that is what HEAD — and so herdr's new
+// worktree — resolves to.
+func TestSyncCloneFetchesBothNamespaces(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "clone")
+	executor := &fakeExecutor{outputs: map[string]string{"git": "trunk\n"}}
+
+	if err := SyncClone(context.Background(), executor, dir); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !executor.ran("git", "-C", dir, "symbolic-ref", "--short", "HEAD") {
+		t.Fatalf("expected HEAD to be resolved, got %v", executor.calls)
+	}
+	// Explicit refspecs, because an explicit one overrides the configured one —
+	// and the refs/heads half is scoped to the default branch and forced, since a
+	// wildcard would fail on any branch a worktree has checked out and an
+	// unforced fetch would reject a rewritten main.
+	if !executor.ran("git", "-C", dir, "fetch", "--quiet", "origin", originRefspec, "+refs/heads/trunk:refs/heads/trunk") {
+		t.Fatalf("expected both refspecs in one fetch, got %v", executor.calls)
+	}
+}
+
+func TestSyncCloneReportsFailure(t *testing.T) {
+	executor := &fakeExecutor{err: errors.New("no network")}
+
+	err := SyncClone(context.Background(), executor, filepath.Join(t.TempDir(), "clone"))
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	requireContains(t, err.Error(), "origin refspec")
 }
 
 // A leftover non-bare checkout must produce a clear error rather than letting
@@ -61,7 +102,7 @@ func TestEnsureCloneRejectsNonBareCheckout(t *testing.T) {
 	}
 	executor := &fakeExecutor{}
 
-	_, err := EnsureClone(context.Background(), executor, "giantswarm", "foo", dir)
+	err := EnsureClone(context.Background(), executor, "giantswarm", "foo", dir)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -71,32 +112,17 @@ func TestEnsureCloneRejectsNonBareCheckout(t *testing.T) {
 	}
 }
 
-// Without this, worktree.create can only branch off main as of the first clone.
-func TestFetchDefaultBranchFetchesTheBranchAtHead(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "clone")
-	executor := &fakeExecutor{outputs: map[string]string{"git": "main"}}
-
-	if err := FetchDefaultBranch(context.Background(), executor, dir); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !executor.ran("git", "-C", dir, "symbolic-ref", "--short", "HEAD") {
-		t.Fatalf("expected HEAD to be resolved, got %v", executor.calls)
-	}
-	// Forced, so a rewritten main still lands. Only HEAD's branch is fetched:
-	// +refs/heads/* would fail on branches checked out in a worktree.
-	if !executor.ran("git", "-C", dir, "fetch", "--quiet", "origin", "+main:main") {
-		t.Fatalf("expected a forced fetch of main, got %v", executor.calls)
-	}
-}
-
-func TestFetchDefaultBranchErrorsWithoutABranchAtHead(t *testing.T) {
+// A detached or otherwise branchless HEAD gives nothing to fetch into and
+// nothing for herdr to branch from, so it must be reported rather than turned
+// into a fetch with an empty refspec.
+func TestSyncCloneErrorsWithoutABranchAtHead(t *testing.T) {
 	executor := &fakeExecutor{}
 
-	err := FetchDefaultBranch(context.Background(), executor, "/clone")
+	err := SyncClone(context.Background(), executor, "/clone")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	requireContains(t, err.Error(), "no branch at HEAD")
+	requireContains(t, err.Error(), "no default branch")
 	if executor.ran("git", "-C", "/clone", "fetch") {
 		t.Fatalf("expected no fetch, got %v", executor.calls)
 	}

@@ -109,7 +109,10 @@ func TestOpenRejectsInvalidBranch(t *testing.T) {
 	}
 }
 
-func TestOpenSkipsCloneWhenBareClonePresent(t *testing.T) {
+// An existing clone is not re-cloned — but it is synced, because herdr branches
+// the worktree off the clone's HEAD and an unfetched clone would put the new
+// work on a stale main.
+func TestOpenSyncsExistingCloneInsteadOfCloning(t *testing.T) {
 	root := t.TempDir()
 	cloneDir := RepoDir(root, "giantswarm", "foo")
 	writeBareClone(t, cloneDir)
@@ -123,34 +126,33 @@ func TestOpenSkipsCloneWhenBareClonePresent(t *testing.T) {
 	}
 	// The whole point: the existing clone is refreshed, so the new worktree
 	// branches off current main rather than main as of the original clone.
-	if !executor.ran("git", "-C", cloneDir, "fetch", "--quiet", "origin", "+main:main") {
-		t.Fatalf("expected the clone to be fetched, got %v", executor.calls)
+	if !executor.ran("git", "-C", cloneDir, "fetch", "--quiet", "origin", originRefspec, "+refs/heads/main:refs/heads/main") {
+		t.Fatalf("expected the clone to be synced, got %v", executor.calls)
 	}
 }
 
-// A clone we just made is already current — fetching it again is a wasted
-// round trip on the slowest path there is.
-func TestOpenSkipsFetchAfterFreshClone(t *testing.T) {
+// A fresh clone is synced too. It is current commit-wise, so this looks like a
+// wasted round trip — but `clone --bare` leaves no refs/remotes/origin/*, so
+// skipping it would hand back the one repo that cannot merge main.
+func TestOpenSyncsFreshClone(t *testing.T) {
+	root := t.TempDir()
+	cloneDir := RepoDir(root, "giantswarm", "foo")
 	executor := &fakeExecutor{outputs: map[string]string{"git": "main"}}
 
-	if _, err := Open(context.Background(), executor, openHerdr(), testConfig(), t.TempDir(), "giantswarm/foo", "iron-lich"); err != nil {
+	if _, err := Open(context.Background(), executor, openHerdr(), testConfig(), root, "giantswarm/foo", "iron-lich"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !executor.ran("git", "clone", "--bare") {
-		t.Fatalf("expected a clone, got %v", executor.calls)
+	if !executor.ran("git", "clone", "--bare", "git@github.com:giantswarm/foo.git", cloneDir) {
+		t.Fatalf("expected a bare clone, got %v", executor.calls)
 	}
-	for _, call := range executor.calls {
-		for _, arg := range call {
-			if arg == "fetch" {
-				t.Fatalf("expected no fetch, got %v", executor.calls)
-			}
-		}
+	if !executor.ran("git", "-C", cloneDir, "fetch", "--quiet", "origin", originRefspec, "+refs/heads/main:refs/heads/main") {
+		t.Fatalf("expected the fresh clone to be synced, got %v", executor.calls)
 	}
 }
 
 // Offline or VPN down must not stop work starting; a stale main is better than
 // no worktree.
-func TestOpenContinuesWhenFetchFails(t *testing.T) {
+func TestOpenContinuesWhenSyncFails(t *testing.T) {
 	root := t.TempDir()
 	writeBareClone(t, RepoDir(root, "giantswarm", "foo"))
 	executor := &fakeExecutor{err: errors.New("could not read from remote")}

@@ -25,6 +25,7 @@ prefix+o  →  herdr-pick pick
                 ├─ existing worktree  →  worktree.open (focus)
                 └─ bare repo          →  prompt branch (default: generated name)
                                       →  git clone if absent
+                                      →  sync clone (fetch + remote-tracking refs)
                                       →  worktree.create
                                       →  agent.start in the new workspace
 ```
@@ -103,6 +104,42 @@ source. A bare clone has no working tree, so there is nothing to open.
 `isBareRepo` detects an existing clone by `HEAD` at the top level rather than a
 `.git` directory. A leftover non-bare checkout is reported as an error rather
 than left for git to fail on confusingly.
+
+### Why the clone is synced on every open
+
+`SyncClone` runs before every `worktree.create`, and exists for two problems
+that share one cause — `git clone --bare` is not a normal clone.
+
+**New work must start from current main.** `worktree.create` branches the new
+checkout off the clone's `HEAD`, so without a fetch the second and every later
+worktree for a repo starts from whatever main was when the clone was first made.
+The round trip is worth paying for on each open, and it happens after the branch
+prompt, so it is not in the way of the picker.
+
+**Worktrees must be able to merge main.** `clone --bare` copies remote heads
+straight into `refs/heads/*` and writes no `remote.origin.fetch`, so
+`refs/remotes/origin/*` never exists. In a worktree that means `git merge
+origin/main` and `git rebase origin/main` fail on an unknown revision and
+`git status` has nothing to count ahead/behind against. `SyncClone` configures
+the refspec a normal clone would have had.
+
+Three details make this less obvious than it looks:
+
+- The refspec is *configured* (`remote.origin.fetch`) so the user's own later
+  `git fetch` behaves normally, and also *passed explicitly* to our fetch,
+  because an explicit refspec overrides the configured one and we need both
+  namespaces updated in a single round trip.
+- The `refs/heads` half is scoped to the default branch, read from `HEAD`. A
+  wildcard `+refs/heads/*:refs/heads/*` fails on any branch a worktree has
+  checked out — which here is every branch herdr-pick creates.
+- Fresh clones are synced too. `clone --bare` leaves no remote-tracking refs, so
+  skipping the sync would hand back the one repo that cannot merge main.
+
+`--replace-all` on the config write means a clone made before this existed
+converges on its next open rather than staying broken forever.
+
+A sync failure is a warning, not an error: offline, a worktree off a stale main
+still beats no worktree.
 
 ## Platform
 

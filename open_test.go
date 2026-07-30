@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -108,16 +109,57 @@ func TestOpenRejectsInvalidBranch(t *testing.T) {
 	}
 }
 
-func TestOpenSkipsCloneWhenBareClonePresent(t *testing.T) {
+// An existing clone is not re-cloned — but it is synced, because herdr branches
+// the worktree off the clone's HEAD and an unfetched clone would put the new
+// work on a stale main.
+func TestOpenSyncsExistingCloneInsteadOfCloning(t *testing.T) {
 	root := t.TempDir()
-	writeBareClone(t, RepoDir(root, "giantswarm", "foo"))
-	executor := &fakeExecutor{}
+	cloneDir := RepoDir(root, "giantswarm", "foo")
+	writeBareClone(t, cloneDir)
+	executor := &fakeExecutor{outputs: map[string]string{"git": "main"}}
 
 	if _, err := Open(context.Background(), executor, openHerdr(), testConfig(), root, "giantswarm/foo", "iron-lich"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(executor.calls) != 0 {
-		t.Fatalf("expected no git commands, got %v", executor.calls)
+	if executor.ran("git", "clone") {
+		t.Fatalf("expected no clone, got %v", executor.calls)
+	}
+	if !executor.ran("git", "-C", cloneDir, "fetch", "origin", originRefspec, "+refs/heads/main:refs/heads/main") {
+		t.Fatalf("expected the clone to be synced, got %v", executor.calls)
+	}
+}
+
+// A fresh clone is synced too: `clone --bare` leaves no refs/remotes/origin/*,
+// so skipping the sync would hand back the one repo that cannot merge main.
+func TestOpenSyncsFreshClone(t *testing.T) {
+	root := t.TempDir()
+	cloneDir := RepoDir(root, "giantswarm", "foo")
+	executor := &fakeExecutor{outputs: map[string]string{"git": "main"}}
+
+	if _, err := Open(context.Background(), executor, openHerdr(), testConfig(), root, "giantswarm/foo", "iron-lich"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !executor.ran("git", "clone", "--bare", "git@github.com:giantswarm/foo.git", cloneDir) {
+		t.Fatalf("expected a bare clone, got %v", executor.calls)
+	}
+	if !executor.ran("git", "-C", cloneDir, "fetch", "origin", originRefspec, "+refs/heads/main:refs/heads/main") {
+		t.Fatalf("expected the fresh clone to be synced, got %v", executor.calls)
+	}
+}
+
+// Offline, a worktree off stale main still beats no worktree: the sync
+// failure is a warning and the work opens anyway.
+func TestOpenContinuesWhenSyncFails(t *testing.T) {
+	root := t.TempDir()
+	writeBareClone(t, RepoDir(root, "giantswarm", "foo"))
+	executor := &fakeExecutor{err: errors.New("no network")}
+	herdr := openHerdr()
+
+	if _, err := Open(context.Background(), executor, herdr, testConfig(), root, "giantswarm/foo", "iron-lich"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !herdr.called("worktree.create") || !herdr.called("pane.send_input") {
+		t.Fatalf("expected the workspace to open anyway, got %v", herdr.methods)
 	}
 }
 

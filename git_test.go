@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -31,6 +32,8 @@ func TestEnsureCloneClonesBareWhenAbsent(t *testing.T) {
 	}
 }
 
+// EnsureClone itself never touches an existing clone: bringing it up to date is
+// SyncClone's job, because that is the part allowed to fail with a warning.
 func TestEnsureCloneSkipsExistingBareClone(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "clone")
 	writeBareClone(t, dir)
@@ -42,6 +45,51 @@ func TestEnsureCloneSkipsExistingBareClone(t *testing.T) {
 	if len(executor.calls) != 0 {
 		t.Fatalf("expected no commands, got %v", executor.calls)
 	}
+}
+
+func TestSyncCloneConfiguresRemoteTrackingRefspec(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "clone")
+	executor := &fakeExecutor{outputs: map[string]string{"git": "trunk\n"}}
+
+	if err := SyncClone(context.Background(), executor, dir); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Without this the worktrees have no origin/* at all, so merging main is
+	// impossible however current refs/heads/main is.
+	if !executor.ran("git", "-C", dir, "config", "--replace-all", "remote.origin.fetch", originRefspec) {
+		t.Fatalf("expected the origin refspec to be configured, got %v", executor.calls)
+	}
+}
+
+// One fetch, both namespaces: remote-tracking refs for the user's merges, and
+// the default branch itself because that is what HEAD — and so herdr's new
+// worktree — resolves to.
+func TestSyncCloneFetchesBothNamespaces(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "clone")
+	executor := &fakeExecutor{outputs: map[string]string{"git": "trunk\n"}}
+
+	if err := SyncClone(context.Background(), executor, dir); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !executor.ran("git", "-C", dir, "symbolic-ref", "--short", "HEAD") {
+		t.Fatalf("expected HEAD to be resolved, got %v", executor.calls)
+	}
+	// Explicit refspecs, because an explicit one overrides the configured one —
+	// and scoped to the default branch, since a wildcard into refs/heads would
+	// fail on any branch a worktree has checked out.
+	if !executor.ran("git", "-C", dir, "fetch", "origin", originRefspec, "+refs/heads/trunk:refs/heads/trunk") {
+		t.Fatalf("expected both refspecs in one fetch, got %v", executor.calls)
+	}
+}
+
+func TestSyncCloneReportsFailure(t *testing.T) {
+	executor := &fakeExecutor{err: errors.New("no network")}
+
+	err := SyncClone(context.Background(), executor, filepath.Join(t.TempDir(), "clone"))
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	requireContains(t, err.Error(), "origin refspec")
 }
 
 // A leftover non-bare checkout must produce a clear error rather than letting

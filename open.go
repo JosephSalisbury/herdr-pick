@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -43,6 +44,11 @@ func open(ctx context.Context, executor Executor, herdr Herdr, cfg Config, root,
 	cloneDir := RepoDir(root, org, repo)
 	if err := EnsureClone(ctx, executor, org, repo, cloneDir); err != nil {
 		return "", err
+	}
+	// A failed sync is a warning, not an error: offline, a worktree off a stale
+	// main still beats no worktree at all.
+	if err := SyncClone(ctx, executor, cloneDir); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 	}
 
 	path := WorktreeDir(root, org, repo, branch)

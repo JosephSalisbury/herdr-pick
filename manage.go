@@ -10,14 +10,32 @@ import (
 )
 
 // OwnsWorktree reports whether a checkout path is one herdr-pick created — it
-// lives under <root>/worktrees. Cleanup and switching only ever touch our own
-// workspaces, never the user's other herdr work.
+// lives under <root>. Cleanup and switching only ever touch our own workspaces,
+// never the user's other herdr work.
+//
+// Everything under <root> is ours except the clones, which are worktree sources
+// and never workspaces. Excluding those is what keeps this meaning "a checkout"
+// now that a repo and its checkouts share a directory.
 func OwnsWorktree(root, checkoutPath string) bool {
 	if checkoutPath == "" {
 		return false
 	}
-	base := filepath.Clean(filepath.Join(root, "worktrees")) + string(filepath.Separator)
-	return strings.HasPrefix(filepath.Clean(checkoutPath)+string(filepath.Separator), base)
+	path := filepath.Clean(checkoutPath)
+	if !withinDir(root, path) {
+		return false
+	}
+	for _, part := range strings.Split(path, string(filepath.Separator)) {
+		if part == bareDir {
+			return false
+		}
+	}
+	return true
+}
+
+// withinDir reports whether path is strictly inside dir, comparing whole path
+// components so <root>-adjacent directories do not match on a string prefix.
+func withinDir(dir, path string) bool {
+	return strings.HasPrefix(filepath.Clean(path), filepath.Clean(dir)+string(filepath.Separator))
 }
 
 // OwnedWorkspaces filters a workspace list down to the ones backed by a

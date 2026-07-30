@@ -149,19 +149,34 @@ func ExpandHome(path string) (string, error) {
 	return filepath.Join(home, path[2:]), nil
 }
 
-// RepoDir returns the parent clone directory for a repository.
+// A repository's clone and its checkouts live in one directory per repo:
+//
+//	<root>/<org>/<repo>/.bare/     the clone
+//	<root>/<org>/<repo>/<branch>/  the worktrees
+//
+// The leading dot on .bare is load-bearing. git forbids a branch name component
+// starting with '.', so the clone can never collide with a worktree beside it.
+const bareDir = ".bare"
+
+// cacheRoot is the one directory at <root> that is not an org. Orgs sit
+// directly at <root>, so this name is never walked for worktrees: an org called
+// "cache" would be shadowed, which is the price of dropping a nesting level.
+const cacheRoot = "cache"
+
+// RepoDir returns the bare clone directory for a repository.
 func RepoDir(root, org, repo string) string {
-	return filepath.Join(root, "repos", org, repo)
+	return filepath.Join(root, org, repo, bareDir)
 }
 
-// WorktreeDir returns the worktree checkout directory for a branch.
+// WorktreeDir returns the worktree checkout directory for a branch, beside the
+// clone it came from.
 func WorktreeDir(root, org, repo, branch string) string {
-	return filepath.Join(root, "worktrees", org, repo, branch)
+	return filepath.Join(root, org, repo, branch)
 }
 
 // CacheDir returns the directory holding per-org repository caches.
 func CacheDir(root string) string {
-	return filepath.Join(root, "cache")
+	return filepath.Join(root, cacheRoot)
 }
 
 // CacheFile returns the cache file path for an org.

@@ -145,12 +145,14 @@ func TestExpandHome(t *testing.T) {
 	}
 }
 
+// A repo's clone and its checkouts share one directory, so everything for a
+// project is in one place.
 func TestPathLayout(t *testing.T) {
 	root := "/r"
-	if got, want := RepoDir(root, "o", "p"), "/r/repos/o/p"; got != want {
+	if got, want := RepoDir(root, "o", "p"), "/r/o/p/.bare"; got != want {
 		t.Fatalf("RepoDir got %q, want %q", got, want)
 	}
-	if got, want := WorktreeDir(root, "o", "p", "b"), "/r/worktrees/o/p/b"; got != want {
+	if got, want := WorktreeDir(root, "o", "p", "b"), "/r/o/p/b"; got != want {
 		t.Fatalf("WorktreeDir got %q, want %q", got, want)
 	}
 	if got, want := CacheFile(root, "o"), "/r/cache/o.txt"; got != want {

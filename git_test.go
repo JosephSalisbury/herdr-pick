@@ -20,7 +20,7 @@ func writeBareClone(t *testing.T, dir string) {
 }
 
 func TestEnsureCloneClonesBareWhenAbsent(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "repos", "giantswarm", "foo")
+	dir := RepoDir(t.TempDir(), "giantswarm", "foo")
 	executor := &fakeExecutor{}
 
 	if err := EnsureClone(context.Background(), executor, "giantswarm", "foo", dir); err != nil {

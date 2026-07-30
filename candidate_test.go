@@ -69,6 +69,41 @@ func TestDiscoverWorktrees(t *testing.T) {
 	}
 }
 
+// The clone now sits beside the checkouts, so it must not be offered as one.
+func TestDiscoverWorktreesIgnoresTheClone(t *testing.T) {
+	root := t.TempDir()
+	writeWorktree(t, root, "giantswarm", "foo", "iron-lich")
+	writeBareClone(t, RepoDir(root, "giantswarm", "foo"))
+
+	got, err := DiscoverWorktrees(root)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d candidates, want 1: %v", len(got), got)
+	}
+	if got[0].String() != "giantswarm/foo@iron-lich" {
+		t.Fatalf("got %q", got[0].String())
+	}
+}
+
+// The cache directory sits at <root> beside the orgs; it must not be mistaken
+// for one.
+func TestDiscoverWorktreesIgnoresTheCache(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "cache", "giantswarm", "foo"), 0o755); err != nil {
+		t.Fatalf("creating cache dir: %v", err)
+	}
+
+	got, err := DiscoverWorktrees(root)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %d candidates, want 0: %v", len(got), got)
+	}
+}
+
 func TestDiscoverWorktreesMissingRootIsEmpty(t *testing.T) {
 	got, err := DiscoverWorktrees(filepath.Join(t.TempDir(), "absent"))
 	if err != nil {

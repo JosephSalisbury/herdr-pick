@@ -58,29 +58,34 @@ func ParseSelection(line string) (org, repo, branch string, err error) {
 	return org, repo, branch, nil
 }
 
-// DiscoverWorktrees walks the worktree root and returns the checkouts found.
-// The filesystem is the source of truth; herdr does not need to be running.
+// DiscoverWorktrees walks <root>/<org>/<repo>/<branch> and returns the
+// checkouts found. The filesystem is the source of truth; herdr does not need
+// to be running.
 func DiscoverWorktrees(root string) ([]Candidate, error) {
-	base := filepath.Join(root, "worktrees")
-
-	orgs, err := readDirNames(base)
+	orgs, err := readDirNames(root)
 	if err != nil {
 		return nil, err
 	}
 
 	var out []Candidate
 	for _, org := range orgs {
-		repos, err := readDirNames(filepath.Join(base, org))
+		if org == cacheRoot {
+			continue
+		}
+		repos, err := readDirNames(filepath.Join(root, org))
 		if err != nil {
 			return nil, err
 		}
 		for _, repo := range repos {
-			branches, err := readDirNames(filepath.Join(base, org, repo))
+			branches, err := readDirNames(filepath.Join(root, org, repo))
 			if err != nil {
 				return nil, err
 			}
 			for _, branch := range branches {
-				path := filepath.Join(base, org, repo, branch)
+				if branch == bareDir {
+					continue
+				}
+				path := filepath.Join(root, org, repo, branch)
 				// A linked worktree has a .git file, not a directory.
 				if _, err := os.Stat(filepath.Join(path, ".git")); err != nil {
 					continue

@@ -36,10 +36,20 @@ Everything lives under one root, hidden by default (`~/.local/share/herdr-pick`)
 
 ```
 <root>/
-├── repos/<org>/<repo>/              # parent clone, only ever a worktree source
-├── worktrees/<org>/<repo>/<branch>/ # checkouts, passed to herdr as --path
-└── cache/<org>.txt                  # one repo per line
+├── <org>/<repo>/.bare/     # clone, only ever a worktree source
+├── <org>/<repo>/<branch>/  # checkouts, passed to herdr as --path
+└── cache/<org>.txt         # one repo per line
 ```
+
+A repository's clone and all its checkouts share one directory, so everything
+for a project is in one place.
+
+`.bare` sits beside the worktrees rather than containing them because git owns
+that namespace: a bare repo keeps its linked-worktree bookkeeping in
+`<clone>/worktrees/<id>/`, and its `objects`, `refs`, `config` and `hooks` at
+the top level. The leading dot is load-bearing — git forbids a branch name
+component starting with `.`, so `.bare` can never collide with a worktree
+directory next to it.
 
 The org is in every path deliberately. herdr's default layout is
 `<worktrees.directory>/<repo>/<branch-slug>` with no org component, so
@@ -49,10 +59,15 @@ always pass an explicit path and never rely on `[worktrees] directory`.
 A branch name is always exactly one path segment — slashes are rejected — so a
 directory name round-trips to a branch name with no slug table.
 
+Because orgs sit directly at `<root>`, `cache` is not walked as an org. An org
+with that name would be shadowed — accepted, in exchange for dropping a nesting
+level.
+
 ### Source of truth
 
-The filesystem. `worktrees/` is walked to find checkouts; a directory counts
-only if it contains a `.git` entry. There is no database and no state file.
+The filesystem. `<root>` is walked to find checkouts; a directory counts only if
+it contains a `.git` entry, which is also what excludes the `.bare` clone beside
+them. There is no database and no state file.
 The cache is derived data and is safe to delete at any time.
 
 ### The GitHub cache
@@ -191,9 +206,10 @@ height = "60%"
 
 Once you have several worktrees in flight, three commands herd them. All three
 speak to herdr over the socket and share one safety rule: they only ever touch
-workspaces whose checkout lives under `<root>/worktrees`, so they can never
-close or focus your unrelated herdr work. A workspace is matched to herdr-pick
-by the `checkout_path` herdr reports in `workspace.list`, not by a state file.
+workspaces whose checkout lives under `<root>` and is not a clone, so they can
+never close or focus your unrelated herdr work. A workspace is matched to
+herdr-pick by the `checkout_path` herdr reports in `workspace.list`, not by a
+state file.
 
 - **`status`** prints one line per open worktree as `status<TAB>label`, ordered
   by urgency — the non-interactive glance at what the whole fleet of agents is

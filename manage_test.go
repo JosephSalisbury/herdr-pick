@@ -8,9 +8,8 @@ import (
 
 func TestOwnsWorktree(t *testing.T) {
 	root := "/data/herdr-pick"
-	base := filepath.Join(root, "worktrees")
 
-	owned := filepath.Join(base, "giantswarm", "foo", "iron-lich")
+	owned := filepath.Join(root, "giantswarm", "foo", "iron-lich")
 	if !OwnsWorktree(root, owned) {
 		t.Fatalf("expected %q to be owned", owned)
 	}
@@ -18,8 +17,10 @@ func TestOwnsWorktree(t *testing.T) {
 	for _, foreign := range []string{
 		"",
 		"/somewhere/else",
-		filepath.Join(root, "repos", "giantswarm", "foo"),
-		"/data/herdr-pick-evil/worktrees/x", // prefix but not a child
+		// The clone is a worktree source, never a workspace.
+		filepath.Join(root, "giantswarm", "foo", ".bare"),
+		"/data/herdr-pick-evil/giantswarm/foo/x", // prefix but not a child
+		root,
 	} {
 		if OwnsWorktree(root, foreign) {
 			t.Fatalf("expected %q not to be owned", foreign)
@@ -38,13 +39,13 @@ func ws(id, checkout, status string) HerdrWorkspace {
 
 func TestDoneWorkspacesFiltersToOwnedAndDone(t *testing.T) {
 	root := "/r"
-	base := filepath.Join(root, "worktrees")
+	base := filepath.Join(root, "o", "r")
 	workspaces := []HerdrWorkspace{
-		ws("a", filepath.Join(base, "o/r/a"), AgentDone),
-		ws("b", filepath.Join(base, "o/r/b"), AgentWorking), // not done
-		ws("c", "/elsewhere/c", AgentDone),                  // done but not ours
-		ws("d", "", AgentDone),                              // no worktree
-		ws("e", filepath.Join(base, "o/r/e"), AgentDone),
+		ws("a", filepath.Join(base, "a"), AgentDone),
+		ws("b", filepath.Join(base, "b"), AgentWorking), // not done
+		ws("c", "/elsewhere/c", AgentDone),              // done but not ours
+		ws("d", "", AgentDone),                          // no worktree
+		ws("e", filepath.Join(base, "e"), AgentDone),
 	}
 
 	got := DoneWorkspaces(root, workspaces)
@@ -59,12 +60,12 @@ func TestDoneWorkspacesFiltersToOwnedAndDone(t *testing.T) {
 
 func TestSwitchCandidatesActiveOnlyByDefault(t *testing.T) {
 	root := "/r"
-	base := filepath.Join(root, "worktrees")
+	base := filepath.Join(root, "o", "r")
 	workspaces := []HerdrWorkspace{
-		ws("idle", filepath.Join(base, "o/r/idle"), AgentIdle),
-		ws("working", filepath.Join(base, "o/r/working"), AgentWorking),
-		ws("done", filepath.Join(base, "o/r/done"), AgentDone),
-		ws("blocked", filepath.Join(base, "o/r/blocked"), AgentBlocked),
+		ws("idle", filepath.Join(base, "idle"), AgentIdle),
+		ws("working", filepath.Join(base, "working"), AgentWorking),
+		ws("done", filepath.Join(base, "done"), AgentDone),
+		ws("blocked", filepath.Join(base, "blocked"), AgentBlocked),
 		ws("foreign", "/elsewhere", AgentWorking),
 	}
 
@@ -88,14 +89,14 @@ func TestSwitchCandidatesActiveOnlyByDefault(t *testing.T) {
 
 func TestCleanDoneRemovesOnlyOwnedDone(t *testing.T) {
 	root := "/r"
-	base := filepath.Join(root, "worktrees")
+	base := filepath.Join(root, "o", "r")
 	herdr := &fakeHerdr{results: map[string]string{
 		"workspace.list": `{"type":"workspace_list","workspaces":[
-			{"workspace_id":"a","label":"a","agent_status":"done","worktree":{"checkout_path":"` + filepath.Join(base, "o/r/a") + `"}},
-			{"workspace_id":"b","label":"b","agent_status":"working","worktree":{"checkout_path":"` + filepath.Join(base, "o/r/b") + `"}},
+			{"workspace_id":"a","label":"a","agent_status":"done","worktree":{"checkout_path":"` + filepath.Join(base, "a") + `"}},
+			{"workspace_id":"b","label":"b","agent_status":"working","worktree":{"checkout_path":"` + filepath.Join(base, "b") + `"}},
 			{"workspace_id":"c","label":"c","agent_status":"done","worktree":{"checkout_path":"/elsewhere/c"}}
 		]}`,
-		"worktree.remove": `{"type":"worktree_removed","path":"` + filepath.Join(base, "o/r/a") + `","workspace_id":"a","forced":false}`,
+		"worktree.remove": `{"type":"worktree_removed","path":"` + filepath.Join(base, "a") + `","workspace_id":"a","forced":false}`,
 	}}
 
 	removed, err := CleanDone(context.Background(), herdr, root, false)
@@ -113,11 +114,11 @@ func TestCleanDoneRemovesOnlyOwnedDone(t *testing.T) {
 
 func TestStatusWorkspacesIncludesDoneAndOrdersByUrgency(t *testing.T) {
 	root := "/r"
-	base := filepath.Join(root, "worktrees")
+	base := filepath.Join(root, "o", "r")
 	workspaces := []HerdrWorkspace{
-		ws("done", filepath.Join(base, "o/r/done"), AgentDone),
-		ws("idle", filepath.Join(base, "o/r/idle"), AgentIdle),
-		ws("blocked", filepath.Join(base, "o/r/blocked"), AgentBlocked),
+		ws("done", filepath.Join(base, "done"), AgentDone),
+		ws("idle", filepath.Join(base, "idle"), AgentIdle),
+		ws("blocked", filepath.Join(base, "blocked"), AgentBlocked),
 		ws("foreign", "/elsewhere", AgentWorking),
 	}
 

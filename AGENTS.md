@@ -150,11 +150,24 @@ existing namespaces.
 
 Over the socket API (newline-delimited JSON), not the CLI. The socket's method
 and parameter names are pinned by a published schema (`herdr api schema`); the
-CLI's flags are not. `herdrProtocol` asserts the version so an upgrade fails
-loudly rather than strangely.
+CLI's flags are not.
 
 Methods used: `ping`, `workspace.create`, `workspace.list`, `workspace.focus`,
 `pane.list`, `pane.send_input`.
+
+`herdrMinProtocol` is a **floor, not an equality**. herdr bumps its protocol
+whenever it adds a method, so asserting equality broke herdr-pick on every herdr
+release even though none of the six methods above had changed. A newer herdr is
+taken as compatible; only an older one is refused on connect.
+
+The incompatibility that actually matters — herdr changing or dropping one of
+those methods — surfaces at the call instead: herdr answers `invalid_request`,
+and `Call` reports that as herdr-pick being out of date. **That** is the signal
+to fix the call and raise the floor; a bumped protocol number on its own is not.
+
+`schema.json` is a snapshot for offline reference, not a contract. Regenerate it
+with `herdr api schema --output schema.json` and diff the methods above to see
+whether a herdr release touched anything herdr-pick uses.
 
 **None of herdr's `worktree.*` methods are used.** herdr-pick does its own git and
 asks herdr only to open a directory. That is the single most important thing to

@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -113,6 +117,40 @@ func (f *fakeHerdr) called(method string) bool {
 		}
 	}
 	return false
+}
+
+// fakeSocket serves reply, newline-terminated, to one connection on a unix
+// socket and returns its path. It exists to exercise SocketHerdr.Call itself,
+// which fakeHerdr stands in for everywhere else.
+func fakeSocket(t *testing.T, reply string) string {
+	t.Helper()
+
+	// The socket lives in a short path of our own: a macOS temp dir can exceed
+	// the sockaddr_un limit.
+	dir, err := os.MkdirTemp("", "hp")
+	if err != nil {
+		t.Fatalf("temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	path := filepath.Join(dir, "s.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = bufio.NewReader(conn).ReadBytes('\n')
+		_, _ = conn.Write([]byte(reply + "\n"))
+	}()
+
+	return path
 }
 
 // requireContains fails the test unless got contains want.

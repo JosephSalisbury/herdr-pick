@@ -9,11 +9,23 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"unicode/utf8"
 )
 
-// herdrProtocol is the socket protocol version this client was written
-// against. It is asserted on connect so a herdr upgrade fails loudly.
-const herdrProtocol = 17
+// herdrMinProtocol is the oldest herdr socket protocol this client works
+// against. It is a floor, not an equality: herdr bumps the protocol as it adds
+// methods, and the handful this client calls have been stable across those
+// bumps, so a newer herdr is taken as compatible. Asserting equality instead
+// meant every herdr upgrade broke herdr-pick for no reason.
+//
+// A herdr that genuinely does change one of those methods is caught where it
+// matters — the call itself comes back invalid_request, which Call reports as
+// herdr-pick being out of date. Raise this floor only when that happens.
+const herdrMinProtocol = 17
+
+// maxErrMessage caps how much of herdr's error message is echoed. Its
+// unknown-method reply enumerates every method it has, which buries the point.
+const maxErrMessage = 160
 
 // Agent statuses herdr reports for a workspace's foreground process. "done"
 // means the agent finished — those worktrees are cleanup candidates. The
@@ -101,6 +113,13 @@ func (h *SocketHerdr) Call(ctx context.Context, method string, params, out any) 
 		return fmt.Errorf("decoding %s response: %w", method, err)
 	}
 	if resp.Error != nil {
+		// invalid_request is how herdr rejects a request it cannot even parse: an
+		// unknown method, or params of the wrong shape. That is protocol drift
+		// rather than a runtime refusal, and it is the only thing a protocol
+		// assertion on connect would have caught.
+		if resp.Error.Code == "invalid_request" {
+			return fmt.Errorf("herdr rejected the %s request (%s): herdr-pick's socket calls are out of date with this herdr", method, truncate(resp.Error.Message, maxErrMessage))
+		}
 		return fmt.Errorf("herdr %s failed: %s (%s)", method, resp.Error.Message, resp.Error.Code)
 	}
 	if out != nil && len(resp.Result) > 0 {
@@ -125,7 +144,18 @@ type HerdrWorkspace struct {
 	AgentStatus string `json:"agent_status"`
 }
 
-// Ping verifies the socket is live and speaking the expected protocol.
+// truncate shortens s to at most n bytes without splitting a rune.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
+}
+
+// Ping verifies the socket is live and not older than the protocol floor.
 func Ping(ctx context.Context, h Herdr) error {
 	var result struct {
 		Protocol int `json:"protocol"`
@@ -133,8 +163,8 @@ func Ping(ctx context.Context, h Herdr) error {
 	if err := h.Call(ctx, "ping", nil, &result); err != nil {
 		return err
 	}
-	if result.Protocol != 0 && result.Protocol != herdrProtocol {
-		return fmt.Errorf("herdr speaks protocol %d, herdr-pick expects %d", result.Protocol, herdrProtocol)
+	if result.Protocol != 0 && result.Protocol < herdrMinProtocol {
+		return fmt.Errorf("herdr speaks protocol %d, herdr-pick needs at least %d: upgrade herdr", result.Protocol, herdrMinProtocol)
 	}
 	return nil
 }

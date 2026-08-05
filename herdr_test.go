@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -182,15 +184,76 @@ func TestWorkspaceFocusTargetsWorkspace(t *testing.T) {
 	}
 }
 
-func TestPingRejectsProtocolMismatch(t *testing.T) {
-	herdr := &fakeHerdr{results: map[string]string{"ping": `{"type":"pong","protocol":999}`}}
-	if err := Ping(context.Background(), herdr); err == nil {
+// The protocol is a floor, not an equality. herdr bumps it when it adds
+// methods, and requiring an exact match meant every herdr release broke
+// herdr-pick even though nothing it calls had changed.
+func TestPingAcceptsNewerProtocol(t *testing.T) {
+	for _, protocol := range []int{herdrMinProtocol, herdrMinProtocol + 2, 999} {
+		h := &fakeHerdr{results: map[string]string{
+			"ping": fmt.Sprintf(`{"type":"pong","protocol":%d}`, protocol),
+		}}
+		if err := Ping(context.Background(), h); err != nil {
+			t.Fatalf("protocol %d: unexpected error: %v", protocol, err)
+		}
+	}
+}
+
+func TestPingRejectsOlderProtocol(t *testing.T) {
+	h := &fakeHerdr{results: map[string]string{
+		"ping": fmt.Sprintf(`{"type":"pong","protocol":%d}`, herdrMinProtocol-1),
+	}}
+	err := Ping(context.Background(), h)
+	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
+	requireContains(t, err.Error(), "upgrade herdr")
+}
 
-	ok := &fakeHerdr{results: map[string]string{"ping": `{"type":"pong","protocol":17}`}}
-	if err := Ping(context.Background(), ok); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+// The one incompatibility that matters — herdr changing or dropping a method
+// herdr-pick calls — is caught at the call, not on connect.
+func TestCallReportsInvalidRequestAsOutOfDate(t *testing.T) {
+	message := "invalid request: unknown variant pane.send_input, expected one of " +
+		strings.Repeat("a, ", 60)
+	reply := fmt.Sprintf(`{"id":"herdr-pick","error":{"code":"invalid_request","message":%q}}`, message)
+	h := &SocketHerdr{Path: fakeSocket(t, reply)}
+
+	err := h.Call(context.Background(), "pane.send_input", map[string]any{"pane_id": "p1"}, nil)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	requireContains(t, err.Error(), "out of date with this herdr")
+	// herdr's unknown-method reply lists all ninety of its methods; echoing it
+	// whole buries the point.
+	if len(err.Error()) > 400 {
+		t.Fatalf("error message not truncated: %d bytes", len(err.Error()))
+	}
+}
+
+// Any other error code is herdr refusing at runtime, which is not a version
+// problem and must not be reported as one.
+func TestCallReportsRuntimeErrorAsIs(t *testing.T) {
+	h := &SocketHerdr{Path: fakeSocket(t, `{"id":"herdr-pick","error":{"code":"linked_worktree_source","message":"nope"}}`)}
+
+	err := h.Call(context.Background(), "workspace.create", nil, nil)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	requireContains(t, err.Error(), "linked_worktree_source")
+	if strings.Contains(err.Error(), "out of date") {
+		t.Fatalf("runtime refusal misreported as a version problem: %v", err)
+	}
+}
+
+func TestTruncate(t *testing.T) {
+	if got := truncate("short", 10); got != "short" {
+		t.Fatalf("got %q", got)
+	}
+	if got := truncate("abcdefghij", 4); got != "abcd…" {
+		t.Fatalf("got %q", got)
+	}
+	// Cutting mid-rune must not produce invalid UTF-8.
+	if got := truncate("aa€bb", 3); got != "aa…" {
+		t.Fatalf("got %q", got)
 	}
 }
 

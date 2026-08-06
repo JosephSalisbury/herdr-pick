@@ -112,19 +112,23 @@ func TestRootPane(t *testing.T) {
 		t.Fatal("expected error for a workspace with no panes")
 	}
 
-	got, err := RootPane([]HerdrPane{{PaneID: "p1"}, {PaneID: "p2", Focused: true}})
-	if err != nil || got != "p2" {
-		t.Fatalf("got %q, %v; want focused pane p2", got, err)
+	got, err := RootPane([]HerdrPane{{PaneID: "p1"}, {PaneID: "p2", TabID: "t2", Focused: true}})
+	if err != nil || got.PaneID != "p2" {
+		t.Fatalf("got %+v, %v; want focused pane p2", got, err)
+	}
+	// The tab comes back with it: the layout is applied to a tab, not a pane.
+	if got.TabID != "t2" {
+		t.Fatalf("got tab %q, want t2", got.TabID)
 	}
 
 	// With nothing focused, fall back to the first pane.
-	if got, err = RootPane([]HerdrPane{{PaneID: "p1"}}); err != nil || got != "p1" {
-		t.Fatalf("got %q, %v; want p1", got, err)
+	if got, err = RootPane([]HerdrPane{{PaneID: "p1"}}); err != nil || got.PaneID != "p1" {
+		t.Fatalf("got %+v, %v; want p1", got, err)
 	}
 }
 
-// The agent must be typed into the existing pane. agent.start would add a
-// second pane, which is not wanted.
+// The agent must be typed into the pane it is given. agent.start would add a
+// pane of its own, outside the layout we built.
 func TestRunInPaneSendsTextAndEnter(t *testing.T) {
 	herdr := &fakeHerdr{}
 

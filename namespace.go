@@ -208,8 +208,8 @@ func OpenNamespace(ctx context.Context, h Herdr, cfg Config, ns Namespace) error
 		return err
 	}
 
-	pane := root.PaneID
-	if pane == "" {
+	pane := root
+	if pane.PaneID == "" {
 		// workspace.create should hand back its root pane; ask if it did not.
 		created, err := PaneList(ctx, h, workspace.WorkspaceID)
 		if err != nil {
@@ -220,10 +220,132 @@ func OpenNamespace(ctx context.Context, h Herdr, cfg Config, ns Namespace) error
 		}
 	}
 
-	if err := RunInPane(ctx, h, pane, agentCommand(cfg.AgentArgv(), ns.Path)); err != nil {
+	// The panes beside the agent's are a convenience; the agent is the point. A
+	// herdr too old for layout.apply should still open the namespace, so this is
+	// a warning rather than an error, like a clone that could not be synced —
+	// and the agent then starts in the one pane the workspace came with.
+	agent := pane.PaneID
+	if laid, err := layoutWorkspace(ctx, h, pane, ns.Path); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	} else {
+		agent = laid
+	}
+
+	if err := RunInPane(ctx, h, agent, agentCommand(cfg.AgentArgv(), ns.Path)); err != nil {
 		return fmt.Errorf("starting agent in %s: %w", ns.Name, err)
 	}
 	return nil
+}
+
+// Shares of the workspace given to each pane. The agent takes the left half;
+// the status pane takes a quarter of the right column's height, which is a
+// quarter of the screen's, and the shell gets the rest.
+const (
+	agentPaneRatio  = 0.5
+	statusPaneRatio = 0.25
+)
+
+// statusCommand is the line the status pane runs: the branch and the working
+// tree of every member, under its own heading, refreshed every couple of
+// seconds.
+//
+// Each member is visited in a subshell rather than with a matching `cd -`, so a
+// member whose git call fails does not leave the loop somewhere else and report
+// the wrong repository from then on. `watch -c` and `color.status=always` are a
+// pair: git suppresses colour when its output is not a terminal, which under
+// watch it never is, and watch discards the escapes unless told to keep them.
+const statusCommand = `watch -c -n2 'for d in */; do (cd "$d" && printf "\033[1;36m%s\033[0m\n" "$d" && git -c color.status=always status --short --branch); done'`
+
+// layoutWorkspace gives a namespace's workspace the shape it is worked in:
+//
+//	┌───────────┬───────────┐
+//	│           │  status   │  a quarter of the height
+//	│   agent   ├───────────┤
+//	│           │   shell   │
+//	└───────────┴───────────┘
+//
+// The two right-hand panes open in the namespace directory, so the human's half
+// of the workspace sees the same members the agent does. It returns the pane the
+// agent is to start in.
+//
+// The layout goes to the agent pane's *tab*. Applying it to the workspace
+// instead puts it in a second tab, which is a workspace split across two tabs:
+// the agent alone in one and three empty panes in the other.
+//
+// **The pane ids come out of the reply, including the agent's.** The request
+// names the existing pane's id, but herdr does not promise to keep it —
+// reshaping a tab can hand the agent's corner to a pane of its own making, and
+// the old id then belongs to nothing. Typing the agent command into the id we
+// sent is how the workspace ended up correctly laid out and completely empty.
+func layoutWorkspace(ctx context.Context, h Herdr, pane HerdrPane, cwd string) (string, error) {
+	if pane.TabID == "" {
+		return "", fmt.Errorf("herdr reported no tab for pane %s: leaving %s as one pane", pane.PaneID, cwd)
+	}
+
+	applied, err := LayoutApply(ctx, h, pane.TabID, namespaceLayout(pane.PaneID, cwd))
+	if err != nil {
+		return "", fmt.Errorf("laying out the workspace for %s: %w", cwd, err)
+	}
+
+	agent, status, shell, err := layoutPanes(applied)
+	if err != nil {
+		return "", err
+	}
+
+	// Both are cd'd as well as opened in the namespace, for the same reason
+	// agentCommand is: a shell rc that changes directory on startup would
+	// otherwise leave them somewhere else, and git status would report on
+	// whatever happened to be there.
+	if err := RunInPane(ctx, h, status, cdCommand(cwd)+" && "+statusCommand); err != nil {
+		return "", fmt.Errorf("starting the status pane: %w", err)
+	}
+	if err := RunInPane(ctx, h, shell, cdCommand(cwd)); err != nil {
+		return "", fmt.Errorf("preparing the shell pane: %w", err)
+	}
+
+	// Applying a layout leaves focus wherever herdr puts it, and the pane worth
+	// typing into is the agent's.
+	if err := PaneFocus(ctx, h, agent); err != nil {
+		return "", fmt.Errorf("focusing the agent pane: %w", err)
+	}
+	return agent, nil
+}
+
+// namespaceLayout builds the tree layoutWorkspace applies.
+func namespaceLayout(agentPane, cwd string) LayoutNode {
+	return LayoutNode{
+		Type:      layoutSplit,
+		Direction: "right",
+		Ratio:     agentPaneRatio,
+		First:     &LayoutNode{Type: layoutPane, PaneID: agentPane},
+		Second: &LayoutNode{
+			Type:      layoutSplit,
+			Direction: "down",
+			Ratio:     statusPaneRatio,
+			First:     &LayoutNode{Type: layoutPane, Cwd: cwd},
+			Second:    &LayoutNode{Type: layoutPane, Cwd: cwd},
+		},
+	}
+}
+
+// layoutPanes reads all three pane ids out of the tree layout.apply returned.
+// herdr answers with the shape it was sent, so they are found by position —
+// there is nothing on a pane to match them by.
+//
+// The agent's comes from the reply like the others, rather than being carried
+// over from the request: herdr is free to have built a new pane there, and the
+// id we asked for would then name nothing.
+func layoutPanes(applied LayoutNode) (agent, status, shell string, err error) {
+	right := applied.Second
+	if applied.First == nil || right == nil || right.First == nil || right.Second == nil {
+		return "", "", "", errors.New("herdr applied a layout of a different shape")
+	}
+
+	agent, status, shell = applied.First.PaneID, right.First.PaneID, right.Second.PaneID
+	if agent == "" || status == "" || shell == "" {
+		return "", "", "", errors.New("herdr's layout left a pane unnamed")
+	}
+	return agent, status, shell, nil
 }
 
 // WorkspaceAt returns the id of the workspace whose pane sits in dir, or an empty
@@ -247,7 +369,13 @@ func WorkspaceAt(panes []HerdrPane, dir string) string {
 // like a herdr-pick bug. Absolute, so it does not depend on where the shell
 // started.
 func agentCommand(argv []string, cwd string) string {
-	return fmt.Sprintf("cd %s && %s", shellQuote(cwd), strings.Join(argv, " "))
+	return cdCommand(cwd) + " && " + strings.Join(argv, " ")
+}
+
+// cdCommand changes to a directory. Absolute and quoted, so it survives a path
+// with a space in it and does not depend on where the pane's shell started.
+func cdCommand(cwd string) string {
+	return "cd " + shellQuote(cwd)
 }
 
 // shellQuote single-quotes a string so it survives as one argument when typed

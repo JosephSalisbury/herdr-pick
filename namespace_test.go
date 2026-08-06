@@ -244,7 +244,8 @@ func TestOpenNamespace(t *testing.T) {
 
 	herdr := &fakeHerdr{results: map[string]string{
 		"pane.list":        `{"panes":[]}`,
-		"workspace.create": `{"workspace":{"workspace_id":"ws1"},"root_pane":{"pane_id":"p1","workspace_id":"ws1"}}`,
+		"workspace.create": `{"workspace":{"workspace_id":"ws1"},"root_pane":{"pane_id":"p1","workspace_id":"ws1","tab_id":"tab1"}}`,
+		"layout.apply":     appliedLayout("p1", "status", "shell"),
 	}}
 	cfg := Config{Agent: []string{"claudebox"}}
 
@@ -262,9 +263,35 @@ func TestOpenNamespace(t *testing.T) {
 		t.Fatalf("got label %v", got)
 	}
 
-	want := "cd '" + ns.Path + "' && claudebox"
-	if got := herdr.paramsFor("pane.send_input")["text"]; got != want {
-		t.Fatalf("got %q, want %q", got, want)
+	if want := "cd '" + ns.Path + "' && claudebox"; herdr.sentInput("p1") != want {
+		t.Fatalf("got %q, want %q", herdr.sentInput("p1"), want)
+	}
+
+	// The layout goes to the agent pane's own tab. Sent the workspace instead,
+	// herdr opens a second tab and the workspace ends up split across two: the
+	// agent alone in one, the new panes empty in the other.
+	layout := herdr.paramsFor("layout.apply")
+	if got, _ := layout["tab_id"].(string); got != "tab1" {
+		t.Fatalf("laid out tab %q, want tab1", got)
+	}
+	if _, ok := layout["workspace_id"]; ok {
+		t.Fatalf("workspace_id must not be sent alongside tab_id: %v", layout)
+	}
+
+	// The status pane watches every member, from the namespace directory.
+	got := herdr.sentInput("status")
+	requireContains(t, got, "cd '"+ns.Path+"' && ")
+	requireContains(t, got, "watch ")
+	requireContains(t, got, "status --short --branch")
+	// The shell pane is left as a shell, sitting in the same directory.
+	if want := "cd '" + ns.Path + "'"; herdr.sentInput("shell") != want {
+		t.Fatalf("got %q, want %q", herdr.sentInput("shell"), want)
+	}
+
+	// The agent's pane is the one the human lands in, not whichever pane herdr
+	// left focused after reshaping the workspace.
+	if id, _ := herdr.paramsFor("pane.focus")["pane_id"].(string); id != "p1" {
+		t.Fatalf("focused %q, want p1", id)
 	}
 
 	// None of herdr's worktree methods are used: members are checked out with
@@ -273,6 +300,127 @@ func TestOpenNamespace(t *testing.T) {
 		if herdr.called(method) {
 			t.Fatalf("%s should not be called", method)
 		}
+	}
+}
+
+// appliedLayout is herdr's reply to layout.apply: the tree it was sent, with a
+// pane id filled in on every node.
+func appliedLayout(agent, status, shell string) string {
+	return `{"layout":{"root":{"type":"split","direction":"right","ratio":0.5,
+		"first":{"type":"pane","pane_id":"` + agent + `"},
+		"second":{"type":"split","direction":"down","ratio":0.25,
+			"first":{"type":"pane","pane_id":"` + status + `"},
+			"second":{"type":"pane","pane_id":"` + shell + `"}}}}}`
+}
+
+// The layout herdr is asked for: the agent keeps the pane it already has, and
+// the two panes beside it open in the namespace directory.
+func TestNamespaceLayout(t *testing.T) {
+	root := namespaceLayout("p1", "/ns/add-foo")
+
+	if root.Type != layoutSplit || root.Direction != "right" || root.Ratio != 0.5 {
+		t.Fatalf("got %+v", root)
+	}
+	// Naming the existing pane is what keeps the agent's pane rather than
+	// replacing it, and it must be the left-hand child.
+	if root.First.PaneID != "p1" || root.First.Cwd != "" {
+		t.Fatalf("agent pane is %+v", root.First)
+	}
+
+	right := root.Second
+	if right.Type != layoutSplit || right.Direction != "down" {
+		t.Fatalf("got %+v", right)
+	}
+	// The upper child is the status pane, and a quarter of the column's height.
+	if right.Ratio != 0.25 {
+		t.Fatalf("got status ratio %v, want 0.25", right.Ratio)
+	}
+	for _, pane := range []*LayoutNode{right.First, right.Second} {
+		if pane.Type != layoutPane || pane.Cwd != "/ns/add-foo" || pane.PaneID != "" {
+			t.Fatalf("got %+v", pane)
+		}
+	}
+}
+
+// A herdr that answers layout.apply with something else shaped must not have
+// its panes guessed at.
+func TestLayoutPanesRejectsAnUnexpectedShape(t *testing.T) {
+	for _, applied := range []LayoutNode{
+		{Type: layoutPane, PaneID: "p1"},
+		{Type: layoutSplit, First: &LayoutNode{Type: layoutPane}, Second: &LayoutNode{Type: layoutPane}},
+		{Type: layoutSplit, First: &LayoutNode{Type: layoutPane, PaneID: "p1"}, Second: &LayoutNode{
+			First:  &LayoutNode{Type: layoutPane},
+			Second: &LayoutNode{Type: layoutPane, PaneID: "p3"},
+		}},
+	} {
+		if _, _, _, err := layoutPanes(applied); err == nil {
+			t.Fatalf("expected an error for %+v", applied)
+		}
+	}
+}
+
+// herdr is free to build a pane of its own where the agent's was, so the id the
+// request named is not the id to type the agent into. Believing otherwise left
+// the workspace correctly laid out and completely empty.
+func TestOpenNamespaceStartsTheAgentInThePaneTheLayoutReturned(t *testing.T) {
+	root := t.TempDir()
+	writeMember(t, root, "add-foo", "claudebox")
+
+	ns, err := LoadNamespace(root, "add-foo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	herdr := &fakeHerdr{results: map[string]string{
+		"pane.list":        `{"panes":[]}`,
+		"workspace.create": `{"workspace":{"workspace_id":"ws1"},"root_pane":{"pane_id":"p1","tab_id":"tab1"}}`,
+		// The pane herdr kept for the agent is not the one it was handed.
+		"layout.apply": appliedLayout("p9", "status", "shell"),
+	}}
+
+	if err := OpenNamespace(context.Background(), herdr, Config{Agent: []string{"claudebox"}}, ns); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The request still names the pane the workspace came with — that is what
+	// asks herdr to reuse it — but nothing afterwards trusts that it did.
+	if got, _ := herdr.paramsFor("layout.apply")["root"].(map[string]any); got == nil {
+		t.Fatal("no layout applied")
+	} else if first, _ := got["first"].(map[string]any); first["pane_id"] != "p1" {
+		t.Fatalf("asked to lay out around %v, want p1", first["pane_id"])
+	}
+
+	requireContains(t, herdr.sentInput("p9"), "claudebox")
+	if herdr.sentInput("p1") != "" {
+		t.Fatalf("agent typed into the stale pane p1: %q", herdr.sentInput("p1"))
+	}
+	if id, _ := herdr.paramsFor("pane.focus")["pane_id"].(string); id != "p9" {
+		t.Fatalf("focused %q, want p9", id)
+	}
+}
+
+// The extra panes are a convenience; the agent is the point. An older herdr
+// that cannot apply a layout still gets the namespace open.
+func TestOpenNamespaceStartsTheAgentWhenTheLayoutFails(t *testing.T) {
+	root := t.TempDir()
+	writeMember(t, root, "add-foo", "claudebox")
+
+	ns, err := LoadNamespace(root, "add-foo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	herdr := &fakeHerdr{results: map[string]string{
+		"pane.list":        `{"panes":[]}`,
+		"workspace.create": `{"workspace":{"workspace_id":"ws1"},"root_pane":{"pane_id":"p1","tab_id":"tab1"}}`,
+		// No layout.apply result: herdr answers with an empty layout.
+	}}
+
+	if err := OpenNamespace(context.Background(), herdr, Config{Agent: []string{"claudebox"}}, ns); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := "cd '" + ns.Path + "' && claudebox"; herdr.sentInput("p1") != want {
+		t.Fatalf("got %q, want %q", herdr.sentInput("p1"), want)
 	}
 }
 
@@ -318,16 +466,52 @@ func TestOpenNamespaceFallsBackToPaneList(t *testing.T) {
 	}
 
 	herdr := &fakeHerdr{results: map[string]string{
-		"pane.list":        `{"panes":[{"pane_id":"p7","workspace_id":"ws1","focused":true}]}`,
+		"pane.list":        `{"panes":[{"pane_id":"p7","workspace_id":"ws1","tab_id":"tab7","focused":true}]}`,
 		"workspace.create": `{"workspace":{"workspace_id":"ws1"}}`,
+		"layout.apply":     appliedLayout("p7", "status", "shell"),
 	}}
 
 	if err := OpenNamespace(context.Background(), herdr, Config{Agent: []string{"claudebox"}}, ns); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got, _ := herdr.paramsFor("pane.send_input")["pane_id"].(string); got != "p7" {
-		t.Fatalf("sent to pane %q, want p7", got)
+	// The pane found by asking is the one the layout is built around and the
+	// agent is started in — and its tab is the one laid out, so the fallback
+	// path lands in the same single tab as the direct one.
+	layout := herdr.paramsFor("layout.apply")
+	if got, _ := layout["tab_id"].(string); got != "tab7" {
+		t.Fatalf("laid out tab %q, want tab7", got)
 	}
+	if got, _ := layout["root"].(map[string]any); got == nil {
+		t.Fatal("no layout applied")
+	} else if first, _ := got["first"].(map[string]any); first["pane_id"] != "p7" {
+		t.Fatalf("laid out around pane %v, want p7", first["pane_id"])
+	}
+	requireContains(t, herdr.sentInput("p7"), "claudebox")
+}
+
+// Without a tab there is nowhere safe to put the layout: applying it to the
+// workspace would open a second tab. The agent still starts, alone.
+func TestOpenNamespaceSkipsTheLayoutWithoutATab(t *testing.T) {
+	root := t.TempDir()
+	writeMember(t, root, "add-foo", "claudebox")
+
+	ns, err := LoadNamespace(root, "add-foo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	herdr := &fakeHerdr{results: map[string]string{
+		"pane.list":        `{"panes":[]}`,
+		"workspace.create": `{"workspace":{"workspace_id":"ws1"},"root_pane":{"pane_id":"p1"}}`,
+	}}
+
+	if err := OpenNamespace(context.Background(), herdr, Config{Agent: []string{"claudebox"}}, ns); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if herdr.called("layout.apply") {
+		t.Fatalf("expected no layout without a tab to apply it to, got %v", herdr.methods)
+	}
+	requireContains(t, herdr.sentInput("p1"), "claudebox")
 }
 
 func TestAgentCommandQuotesTheNamespacePath(t *testing.T) {

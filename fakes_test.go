@@ -109,6 +109,22 @@ func (f *fakeHerdr) paramsFor(method string) map[string]any {
 	return nil
 }
 
+// sentInput returns the text pane.send_input carried to a pane, or "" if
+// nothing was typed into it. A workspace has several panes, so the first
+// send_input is not necessarily the one a test means.
+func (f *fakeHerdr) sentInput(paneID string) string {
+	for i, m := range f.methods {
+		if m != "pane.send_input" {
+			continue
+		}
+		if id, _ := f.params[i]["pane_id"].(string); id == paneID {
+			text, _ := f.params[i]["text"].(string)
+			return text
+		}
+	}
+	return ""
+}
+
 // called reports whether method was invoked.
 func (f *fakeHerdr) called(method string) bool {
 	for _, m := range f.methods {

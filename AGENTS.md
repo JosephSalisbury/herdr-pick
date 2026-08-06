@@ -38,7 +38,7 @@ prefix+o  →  herdr-pick pick
                                            →  clone what's missing
                                            →  sync each clone
                                            →  git worktree add each member
-                                           →  open, then start the agent
+                                           →  open, lay out, start the agent
 ```
 
 The namespace name is also the **branch name in every member**, so one feature
@@ -153,11 +153,11 @@ and parameter names are pinned by a published schema (`herdr api schema`); the
 CLI's flags are not.
 
 Methods used: `ping`, `workspace.create`, `workspace.list`, `workspace.focus`,
-`pane.list`, `pane.send_input`.
+`pane.list`, `pane.send_input`, `pane.focus`, `layout.apply`.
 
 `herdrMinProtocol` is a **floor, not an equality**. herdr bumps its protocol
 whenever it adds a method, so asserting equality broke herdr-pick on every herdr
-release even though none of the six methods above had changed. A newer herdr is
+release even though none of the methods above had changed. A newer herdr is
 taken as compatible; only an older one is refused on connect.
 
 The incompatibility that actually matters — herdr changing or dropping one of
@@ -211,23 +211,85 @@ by where something is rather than by a state file — the same principle as the 
 It is also what lets opening a namespace focus an existing workspace instead of
 creating a second one onto the same checkouts.
 
+### The workspace layout
+
+A namespace workspace opens in three panes:
+
+```
+┌───────────┬───────────┐
+│           │  status   │  25% of the height
+│   agent   ├───────────┤
+│           │   shell   │
+└───────────┴───────────┘
+```
+
+The status pane `watch`es one `git status --short --branch` per member, each
+under its own heading, and the shell pane is left empty for the human. Both
+start in the namespace directory, so the
+human's half of the workspace sees exactly the members the agent does — which is
+what makes the pair useful given the agent has no git of its own (see *Known
+limitations*).
+
+**One `layout.apply`, not two `pane.split`s.** `pane.split{direction, ratio}`
+would need one call per pane, and its `ratio` has no named side: it is the new
+pane's share, or the split pane's, and nothing in the schema says which. A
+`layout.apply` node carries an explicit `first`/`second`, so `ratio` is
+unambiguously `first`'s share — left child for `right`, upper child for `down`.
+The reply is the same tree with a `pane_id` filled in on every node, which is
+how the panes are identified: **by position, not by matching**, since there is
+nothing on a pane to match them by. `layoutPanes` refuses a reply of a different
+shape rather than guessing.
+
+The agent's node names the `pane_id` `workspace.create` already returned, which
+asks herdr to reuse that pane rather than build another. The layout is applied
+*before* the agent starts, so claudebox does not boot at full width and get
+resized underneath itself.
+
+**Every pane id comes out of the reply, the agent's included.** Naming a pane in
+the request is a request, not a guarantee: reshaping a tab can hand the agent's
+corner to a pane of herdr's own making, and the id that was sent then belongs to
+nothing. Typing the agent command into the id we sent is how the workspace ended
+up correctly laid out and completely empty — three panes, no agent, no error,
+because `pane.send_input` to a pane that no longer exists is not obviously
+wrong from the outside.
+
+**Apply to the `tab_id`, never the `workspace_id`.** Both parameters are
+optional and the workspace is the obvious one to reach for, but herdr then
+applies the layout to a *new tab* of that workspace — so you get the agent alone
+in one tab and three empty panes in another, which is exactly the layout you
+asked for and none of the workspace you wanted. The tab is taken from the agent
+pane's own `tab_id` (required on `PaneInfo`, so it is always there): the tab the
+agent is in is definitionally the one to build around. With no tab reported
+there is nowhere safe to put the layout, so it is skipped rather than guessed
+at, and the namespace opens as one pane.
+
+**A layout failure is a warning, not an error.** The side panes are a
+convenience and the agent is the point, so a herdr too old for `layout.apply`
+still opens the namespace — the same call the clone sync makes.
+
+`layout.apply` leaves focus wherever it chooses, so `pane.focus` names the
+agent's pane at the end: that is the one worth typing into.
+
 ### Why not agent.start
 
 `agent.start` looks like the obvious way to launch the agent, but it has no
-`pane_id` parameter and its only `split` values are `right` and `down` — so it
-always adds a *second* pane alongside the one the workspace already has. One pane
-is the requirement.
+`pane_id` parameter, so it cannot be pointed at a pane we already have — and its
+only `split` values are `right` and `down`, so it would add a fourth pane of its
+own wherever it liked in the layout above.
 
-Instead: `pane.list` the workspace, take the focused (or only) pane, and
-`pane.send_input` the agent command with `keys: ["enter"]` — text and Enter in
-one call, which is how herdr's own `pane run` submits atomically under bracketed
-paste. herdr still tracks the agent, because it detects agents from the
-foreground process rather than from registration.
+Instead: take the workspace's root pane (`workspace.create` returns it,
+`pane.list` finds it if not) and `pane.send_input` the agent command with
+`keys: ["enter"]` — text and Enter in one call, which is how herdr's own
+`pane run` submits atomically under bracketed paste. herdr still tracks the
+agent, because it detects agents from the foreground process rather than from
+registration.
 
 The command is `cd <namespace> && <agent>`, absolute rather than relative, so it
 does not depend on where the pane's shell starts. **claudebox mounts exactly one
 directory — its cwd** — so the namespace has to *be* the cwd for the agent to see
-every member.
+every member. The status and shell panes are `cd`'d the same way on top of their
+`cwd`, for the same reason: a shell rc that changes directory on startup would
+otherwise have `git status` reporting on somewhere else entirely.
 
 ### Check all, then act
 

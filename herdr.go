@@ -222,9 +222,13 @@ func WorkspaceFocus(ctx context.Context, h Herdr, workspaceID string) error {
 // workspace has no worktree for herdr to report, and WorkspaceInfo carries no
 // path of its own, so the pane's working directory is the only thing tying a
 // workspace to a place on disk.
+// TabID is what a layout is applied to. A workspace can hold several tabs, so
+// the workspace alone does not say where panes should go — naming the tab the
+// agent's pane is already in is what puts the rest of the layout beside it.
 type HerdrPane struct {
 	PaneID        string `json:"pane_id"`
 	WorkspaceID   string `json:"workspace_id"`
+	TabID         string `json:"tab_id"`
 	Focused       bool   `json:"focused"`
 	Cwd           string `json:"cwd"`
 	ForegroundCwd string `json:"foreground_cwd"`
@@ -256,29 +260,32 @@ func PaneList(ctx context.Context, h Herdr, workspaceID string) ([]HerdrPane, er
 	return result.Panes, nil
 }
 
-// RootPane picks the pane to run the agent in: the focused one, else the only
-// one. workspace.create yields a single-pane workspace and we deliberately do
-// not add a second.
-func RootPane(panes []HerdrPane) (string, error) {
+// RootPane picks the pane to run the agent in: the focused one, else the first.
+// workspace.create yields a single-pane workspace, and that pane is the one the
+// layout is then built around, so it is the agent's.
+//
+// The whole pane rather than its id, because the layout needs its tab too.
+func RootPane(panes []HerdrPane) (HerdrPane, error) {
 	if len(panes) == 0 {
-		return "", errors.New("workspace has no panes")
+		return HerdrPane{}, errors.New("workspace has no panes")
 	}
 	for _, p := range panes {
 		if p.Focused {
-			return p.PaneID, nil
+			return p, nil
 		}
 	}
-	return panes[0].PaneID, nil
+	return panes[0], nil
 }
 
 // RunInPane types a command into an existing pane and submits it.
 //
-// Deliberately not agent.start: that has no pane_id parameter and its only
-// split options are right/down, so it always adds a second pane. Typing into
-// the pane worktree.create already made keeps the workspace to one pane, and
-// herdr still tracks the agent because it detects them from the foreground
-// process. send_input carries text and Enter in one call, which is how herdr's
-// own `pane run` submits atomically under bracketed paste.
+// Deliberately not agent.start: that has no pane_id parameter, so it cannot be
+// pointed at a pane we already have — and its only split options are right and
+// down, so it would add a pane of its own alongside whichever layout we built.
+// Typing into a named pane leaves the layout alone, and herdr still tracks the
+// agent because it detects them from the foreground process. send_input carries
+// text and Enter in one call, which is how herdr's own `pane run` submits
+// atomically under bracketed paste.
 func RunInPane(ctx context.Context, h Herdr, paneID, command string) error {
 	params := map[string]any{
 		"pane_id": paneID,
@@ -286,4 +293,66 @@ func RunInPane(ctx context.Context, h Herdr, paneID, command string) error {
 		"keys":    []string{"enter"},
 	}
 	return h.Call(ctx, "pane.send_input", params, nil)
+}
+
+// PaneFocus puts the cursor in a pane. Applying a layout leaves focus wherever
+// herdr chooses, so the pane the human types into is named explicitly.
+func PaneFocus(ctx context.Context, h Herdr, paneID string) error {
+	return h.Call(ctx, "pane.focus", map[string]any{"pane_id": paneID}, nil)
+}
+
+// Node types in herdr's layout tree.
+const (
+	layoutPane  = "pane"
+	layoutSplit = "split"
+)
+
+// LayoutNode is one node of herdr's declarative pane tree: either a pane or a
+// split of two children, discriminated by Type.
+//
+// One struct rather than two, because the tree is walked far more often than it
+// is type-switched, and omitempty keeps the unused half out of the request. A
+// PaneID on a pane node adopts an existing pane; without one herdr creates a
+// pane, and fills the id in on the tree it returns.
+type LayoutNode struct {
+	Type string `json:"type"`
+
+	// Pane nodes.
+	PaneID string `json:"pane_id,omitempty"`
+	Cwd    string `json:"cwd,omitempty"`
+
+	// Split nodes. Ratio is First's share of the space; for direction "right"
+	// First is the left child, for "down" it is the upper one.
+	Direction string      `json:"direction,omitempty"`
+	Ratio     float64     `json:"ratio,omitempty"`
+	First     *LayoutNode `json:"first,omitempty"`
+	Second    *LayoutNode `json:"second,omitempty"`
+}
+
+// LayoutApply reshapes a tab's panes to a declared tree, and returns the tree
+// herdr actually built — the same shape, with a pane id filled in on every
+// node, which is how the panes it created are identified.
+//
+// Declaring the whole tree in one call rather than walking it with pane.split:
+// the split node carries an explicit first/second, so a ratio is unambiguously
+// one named child's share rather than "the new pane's" or "the old pane's", and
+// a three-pane workspace costs one round trip instead of two.
+//
+// A tab, not a workspace. Both parameters are optional and it is tempting to
+// pass the workspace, but herdr then applies the layout to a *new* tab of it —
+// leaving the agent alone in the old one and the new panes empty in the new.
+func LayoutApply(ctx context.Context, h Herdr, tabID string, root LayoutNode) (LayoutNode, error) {
+	params := map[string]any{
+		"tab_id": tabID,
+		"root":   root,
+	}
+	var result struct {
+		Layout struct {
+			Root LayoutNode `json:"root"`
+		} `json:"layout"`
+	}
+	if err := h.Call(ctx, "layout.apply", params, &result); err != nil {
+		return LayoutNode{}, err
+	}
+	return result.Layout.Root, nil
 }

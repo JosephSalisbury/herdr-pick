@@ -127,7 +127,7 @@ func LoadNamespace(root, name string) (Namespace, error) {
 // the error names the directory to delete: with no state file recording the
 // intended member list, nothing can tell later that a namespace is incomplete.
 func CreateNamespace(ctx context.Context, executor Executor, root, name string, members []RepoRef) (Namespace, error) {
-	if err := ValidateBranchName(name); err != nil {
+	if err := ValidateName(name); err != nil {
 		return Namespace{}, fmt.Errorf("namespace name: %w", err)
 	}
 	if len(members) == 0 {
@@ -192,18 +192,29 @@ func CreateNamespace(ctx context.Context, executor Executor, root, name string, 
 //
 // The directory is also what claudebox mounts, so it has to be the agent's cwd.
 func OpenNamespace(ctx context.Context, h Herdr, cfg Config, ns Namespace) error {
-	// A namespace is usually resumed after its workspace was closed, but focusing
-	// an open one is nearly free here and beats opening a second workspace onto
-	// the same checkouts.
+	return openWorkspace(ctx, h, cfg, ns.Path, ns.Name, layoutWorkspace)
+}
+
+// layoutFunc shapes a freshly created workspace and returns the pane the agent
+// is to start in. It is what a namespace and a temp directory differ by, and
+// the only thing.
+type layoutFunc func(ctx context.Context, h Herdr, pane HerdrPane, cwd string) (string, error)
+
+// openWorkspace opens a directory as a herdr workspace and starts the agent in
+// it, or focuses the workspace if one is already open on that directory.
+func openWorkspace(ctx context.Context, h Herdr, cfg Config, path, label string, layout layoutFunc) error {
+	// A workspace is usually opened after the last one on it was closed, but
+	// focusing an open one is nearly free here and beats opening a second
+	// workspace onto the same directory.
 	panes, err := PaneList(ctx, h, "")
 	if err != nil {
 		return err
 	}
-	if id := WorkspaceAt(panes, ns.Path); id != "" {
+	if id := WorkspaceAt(panes, path); id != "" {
 		return WorkspaceFocus(ctx, h, id)
 	}
 
-	workspace, root, err := WorkspaceCreate(ctx, h, ns.Path, ns.Name)
+	workspace, root, err := WorkspaceCreate(ctx, h, path, label)
 	if err != nil {
 		return err
 	}
@@ -216,23 +227,23 @@ func OpenNamespace(ctx context.Context, h Herdr, cfg Config, ns Namespace) error
 			return err
 		}
 		if pane, err = RootPane(created); err != nil {
-			return fmt.Errorf("finding pane for %s: %w", ns.Name, err)
+			return fmt.Errorf("finding pane for %s: %w", label, err)
 		}
 	}
 
 	// The panes beside the agent's are a convenience; the agent is the point. A
-	// herdr too old for layout.apply should still open the namespace, so this is
+	// herdr too old for layout.apply should still open the workspace, so this is
 	// a warning rather than an error, like a clone that could not be synced —
 	// and the agent then starts in the one pane the workspace came with.
 	agent := pane.PaneID
-	if laid, err := layoutWorkspace(ctx, h, pane, ns.Path); err != nil {
+	if laid, err := layout(ctx, h, pane, path); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 	} else {
 		agent = laid
 	}
 
-	if err := RunInPane(ctx, h, agent, agentCommand(cfg.AgentArgv(), ns.Path)); err != nil {
-		return fmt.Errorf("starting agent in %s: %w", ns.Name, err)
+	if err := RunInPane(ctx, h, agent, agentCommand(cfg.AgentArgv(), path)); err != nil {
+		return fmt.Errorf("starting agent in %s: %w", label, err)
 	}
 	return nil
 }

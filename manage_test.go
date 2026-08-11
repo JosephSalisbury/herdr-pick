@@ -10,6 +10,8 @@ func TestOwnsPath(t *testing.T) {
 	for _, owned := range []string{
 		NamespaceDir(root, "add-foo"),
 		MemberDir(root, "add-foo", "claudebox"),
+		// Temp directories are openable too, so status and switch must see them.
+		TempDir(root, "jade-wyvern"),
 	} {
 		if !OwnsPath(root, owned) {
 			t.Fatalf("expected %q to be owned", owned)
@@ -24,6 +26,7 @@ func TestOwnsPath(t *testing.T) {
 		"/data/herdr-pick-evil/ns/x/y", // prefix but not a child
 		root,
 		NamespaceRoot(root),
+		TempRoot(root),
 	} {
 		if OwnsPath(root, foreign) {
 			t.Fatalf("expected %q not to be owned", foreign)

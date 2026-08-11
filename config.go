@@ -149,11 +149,12 @@ func ExpandHome(path string) (string, error) {
 	return filepath.Join(home, path[2:]), nil
 }
 
-// Everything lives under three fixed roots, and nothing user-named sits at
+// Everything lives under four fixed roots, and nothing user-named sits at
 // <root> itself:
 //
 //	<root>/clones/<org>/<repo>/  bare clones, only ever worktree sources
 //	<root>/ns/<name>/<repo>/     checkouts, one per namespace member
+//	<root>/tmp/<name>/           temp directories, no members and no git
 //	<root>/cache/<org>.txt       derived data, safe to delete
 //
 // Keeping orgs and namespace names a level below the roots is what removes the
@@ -164,9 +165,17 @@ func ExpandHome(path string) (string, error) {
 // A clone needs no ".bare" suffix because a checkout is never its sibling, so
 // there is nothing for it to collide with. It stays bare so the worktree source
 // has no working tree to be committed into.
+//
+// A temp directory gets a root of its own rather than sitting in <root>/ns as a
+// member-less namespace, because its *location* is then what says which it is.
+// Sharing the namespace root would mean telling a deliberately empty directory
+// from a create that failed partway — which is precisely what
+// DiscoverNamespaces reads "no members" as — and that takes a marker file, the
+// one state file this tool does not have.
 const (
 	cloneRoot = "clones"
 	nsRoot    = "ns"
+	tmpRoot   = "tmp"
 	cacheRoot = "cache"
 )
 
@@ -192,6 +201,18 @@ func NamespaceDir(root, name string) string {
 // cannot both be members, and CreateNamespace rejects that at creation.
 func MemberDir(root, name, repo string) string {
 	return filepath.Join(root, nsRoot, name, repo)
+}
+
+// TempRoot returns the directory holding every temp directory.
+func TempRoot(root string) string {
+	return filepath.Join(root, tmpRoot)
+}
+
+// TempDir returns one temp directory: the agent's working directory and the one
+// path claudebox mounts, as a namespace's directory is — but with nothing
+// checked out inside it.
+func TempDir(root, name string) string {
+	return filepath.Join(root, tmpRoot, name)
 }
 
 // CacheDir returns the directory holding per-org repository caches.

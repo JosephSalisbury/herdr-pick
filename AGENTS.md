@@ -31,9 +31,13 @@ over all of them.
 ```
 prefix+o  →  herdr-pick pick
                 │
-                ├─ candidates: existing namespaces, then cached GitHub repos
+                ├─ candidates: namespaces, temp dirs, "+ new temp directory",
+                │              then cached GitHub repos
                 ├─ fzf --multi
                 ├─ one namespace selected  →  resume it
+                ├─ one temp dir selected   →  resume it
+                ├─ new temp dir selected   →  prompt name
+                │                          →  mkdir, open, start the agent
                 └─ repos marked            →  prompt name
                                            →  clone what's missing
                                            →  sync each clone
@@ -56,13 +60,14 @@ it.
 
 ### Disk layout
 
-Three fixed roots under `~/.local/share/herdr-pick`, and nothing user-named at
+Four fixed roots under `~/.local/share/herdr-pick`, and nothing user-named at
 the top:
 
 ```
 <root>/
 ├── clones/<org>/<repo>/    # bare clones, only ever worktree sources
 ├── ns/<name>/<repo>/       # every checkout, one per namespace member
+├── tmp/<name>/             # temp directories, no members and no git
 └── cache/<org>.txt         # one repo per line
 ```
 
@@ -85,7 +90,8 @@ sharing a repo name cannot both be members, which `CreateNamespace` rejects
 rather than silently resolves.
 
 A namespace name is always exactly one path segment — it is a branch name, so
-`ValidateBranchName` applies and slashes are rejected.
+`ValidateName` applies and slashes are rejected. A temp directory's name is only
+ever a directory, but the rules are the same, so it is the same check.
 
 ### Source of truth
 
@@ -98,17 +104,31 @@ half-built namespace — a create that failed partway — out of the picker.
 
 ### The picker
 
-One keybinding does both verbs, because **what you selected decides which verb
-it is**: a namespace can only be resumed, and repositories can only start a new
+One keybinding does every verb, because **what you selected decides which verb
+it is**: existing work can only be opened, and repositories can only start a new
 namespace. So there is nothing extra to confirm.
 
 - one namespace → resume
+- one temp directory → resume
+- `+ new temp directory` → a fresh empty directory
 - one repo, unmarked → a one-member namespace
 - several repos, TAB-marked → a namespace over all of them
-- a namespace mixed with repos → an error; the two verbs are not combinable
+- anything else combined → an error
+
+**Only repositories combine.** Everything else names one thing to open, so two
+of them — or one of them mixed with repos — names no verb at all. That is the
+same rule as before, generalised rather than changed, and it is why
+`ResolveSelection` answers with a `Selection` (one field set) rather than a
+`*Namespace` with nil meaning "create".
 
 Namespaces lead the list because returning to work already in flight is the
-commoner case.
+commoner case — which is also what stops Enter on an empty query quietly making
+a directory where it used to resume something. The fixed temp line sits with the
+temp directories below them, so typing `temp` finds all of them at once.
+
+Because that line is always present the list is never empty, so the old
+`no candidates` error is a warning now: with no orgs configured and nothing in
+flight, a temp directory is still something to open.
 
 `fzf --multi` rather than asking repo-by-repo until done: marks are visible
 inline, unmarking works, and it is one screen and one Enter rather than one
@@ -133,6 +153,13 @@ Typing `claudebox-image` therefore finds both the namespace already containing i
 and the repo itself. Namespace and repo lines stay distinguishable without a
 sigil: a namespace name never contains a slash and a repo always contains exactly
 one.
+
+A temp directory is bracketed where a namespace is parenthesised — `jade-wyvern
+[temp]` — because that map is also what makes two candidates rendering alike
+shadow each other *silently*, and a namespace whose single member happened to be
+called `temp` would otherwise read exactly as a temp directory does. The fixed
+line, `+ new temp directory`, cannot be collided with at all: `ValidateName`
+rejects both spaces and `+`.
 
 ### The GitHub cache
 
@@ -345,6 +372,56 @@ Four details make this less obvious than it looks:
 A sync failure is a warning, not an error, like the cache refresh: offline or VPN
 down, work started from a stale main still beats no work started.
 
+## Temp directories
+
+A **temp directory** is a named, empty directory opened as a workspace with the
+agent in it: what you want when you just want to try something out and there is
+no repository to hang it off.
+
+It is deliberately *not* a member-less namespace. Kind is encoded by **location**
+— `<root>/tmp/<name>` — the same way `clones/` and `ns/` already encode it. In
+`<root>/ns` an empty directory already means something else: a create that failed
+partway, which is exactly what `DiscoverNamespaces` skips on. Telling that apart
+from a deliberately empty one would take a marker file, and there is no state
+file in this tool to put it in.
+
+So `DiscoverTemps` has nothing to filter on — every subdirectory of `<root>/tmp`
+counts, because an empty directory is precisely what a temp directory *is*.
+`CreateTemp` needs no `Executor` and no context: there is no clone, no fetch, no
+branch and no pre-flight, so it cannot fail on the network.
+
+Everything downstream is the namespace path unchanged. `OpenNamespace` and
+`OpenTemp` are both `openWorkspace(path, label, layout)` — focus an open
+workspace if there is one, else create, lay out, start the agent, warn rather
+than fail if the layout could not be applied. **The layout function is the only
+difference between them**, and it should stay that way.
+
+The name is prompted for with a generated default, as a namespace's is, even
+though nothing but the directory and the workspace label depends on it: a
+directory called `jade-wyvern` is no help finding the one experiment you wanted
+back, and the prompt is one Enter away from that same generated name anyway.
+
+`herdr-pick temp <name>` differs from `new` in one way: an existing name
+**resumes** rather than failing. There is no branch to collide with, so the only
+thing the name can already mean is the directory you asked for.
+
+### The temp workspace layout
+
+```
+┌───────────┬───────────┐
+│           │           │
+│   agent   │   shell   │
+│           │           │
+└───────────┴───────────┘
+```
+
+Two panes rather than three. The third watches one `git status` per member, and
+a temp directory has no members — it would sit there refreshing an empty screen
+every two seconds. Everything else about the layout is the namespace's, for the
+namespace's reasons: apply to the pane's `tab_id` and never the `workspace_id`,
+and read **both** pane ids back out of the reply rather than trusting the ids the
+request named.
+
 ## Known limitations
 
 - **The agent has no git.** claudebox does not install `git` or `gh`, and a
@@ -355,6 +432,10 @@ down, work started from a stale main still beats no work started.
   experience with the design first. Fixing it means either mounting each member's
   clone at its host path, or making members `git clone --local` copies (hardlinked
   objects, so a real `.git` directory inside the mount) rather than worktrees.
+- **Temp directories accumulate.** Nothing removes them, and the picker lists
+  every one it finds, so a month of experiments is a month of picker lines.
+  `herdr-pick list --temp` is the enumeration to `rm` from; that it exists at all
+  is the admission that this needs a teardown as much as namespaces do.
 - **No teardown.** Namespaces are removed by hand. There is no `clean`: herdr's
   `worktree.remove` takes a workspace and removes the one checkout backing it, and
   a namespace's workspace is backed by a directory rather than a checkout, so
@@ -407,9 +488,13 @@ height = "60%"
 ## Managing work
 
 Both management commands speak to herdr over the socket and share one safety
-rule: they only ever touch workspaces sitting under `<root>/ns`, so they can never
-focus your unrelated herdr work. A workspace is matched to herdr-pick by its
-pane's working directory, not by a state file.
+rule: they only ever touch workspaces sitting under `<root>/ns` or `<root>/tmp`,
+so they can never focus your unrelated herdr work. A workspace is matched to
+herdr-pick by its pane's working directory, not by a state file.
+
+Two explicit containment checks, deliberately not one check against `<root>` with
+`clones/` and `cache/` excluded: naming what to skip is the problem the disk
+layout was arranged to avoid.
 
 - **`status`** prints one line per open namespace as `status<TAB>label`, ordered
   by urgency — the non-interactive glance at what the whole fleet of agents is
@@ -428,14 +513,20 @@ tracking of its own. A status only exists while a workspace is open.
 - `pick` — the keybound entry point: candidates, fzf, resume or create
 - `new <name> <org/repo>...` — create a namespace without the picker
 - `open <name>` — resume a namespace without the picker
+- `temp [name]` — open a temp directory, creating it if it does not exist
 - `list` — one line per namespace as `name<TAB>member,member`, for piping
+  (`--temp` lists temp directory names instead)
 - `status` — one line per open namespace with its agent status, for piping
 - `switch` — fuzzy-pick a namespace with a live agent and focus it (`--all`)
 - `refresh` — refill every org cache
 - `ping` — check the herdr socket, independently of the open flow
 
-`new` and `open` are the non-interactive halves of `pick` — the same two verbs
-without fzf or a prompt.
+`new`, `open` and `temp` are the non-interactive halves of `pick` — the same
+verbs without fzf or a prompt.
+
+`list --temp` is a flag rather than more lines in the same output because that
+output is `name<TAB>member,member` and a temp directory has no members: it has
+nothing to say in that shape.
 
 ## Conventions
 

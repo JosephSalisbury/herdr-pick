@@ -19,10 +19,11 @@ const fzfCancelled = 130
 
 var pickCmd = &cobra.Command{
 	Use:   "pick",
-	Short: "Show the picker and resume or start a namespace",
-	Long: "Lists existing namespaces and then every cached repository. Selecting a " +
-		"namespace resumes it; marking one or more repositories starts a new " +
-		"namespace over them.",
+	Short: "Show the picker and open a namespace or a temp directory",
+	Long: "Lists existing namespaces, existing temp directories, a line that makes a " +
+		"new temp directory, and then every cached repository. Selecting a " +
+		"namespace or temp directory opens it; marking one or more repositories " +
+		"starts a new namespace over them.",
 	RunE: runPick,
 }
 
@@ -39,8 +40,11 @@ func runPick(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	if len(candidates) == 0 {
-		return fmt.Errorf("no candidates: add an 'orgs' list to %s, then run 'herdr-pick refresh'", configHint())
+	// The fixed temp line means the list is never empty, so an empty one is a
+	// warning rather than the error it used to be: a temp directory is exactly
+	// what is still useful with nothing configured and nothing in flight.
+	if len(candidates) == 1 {
+		fmt.Fprintf(os.Stderr, "warning: nothing but a temp directory to offer: add an 'orgs' list to %s, then run 'herdr-pick refresh'\n", configHint())
 	}
 
 	lines, byLine := candidateLines(candidates)
@@ -61,9 +65,9 @@ func runPick(cmd *cobra.Command, _ []string) error {
 		chosen = append(chosen, c)
 	}
 
-	// A namespace needs no name and a set of repos does, so the selection itself
-	// decides the verb and there is nothing extra to confirm.
-	ns, err := ResolveSelection(chosen)
+	// Existing work needs no name and a set of repos does, so the selection
+	// itself decides the verb and there is nothing extra to confirm.
+	selection, err := ResolveSelection(chosen)
 	if err != nil {
 		return err
 	}
@@ -76,39 +80,67 @@ func runPick(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	if ns != nil {
-		return openAndReport(cmd.Context(), herdr, cfg, *ns)
+	switch {
+	case selection.Namespace != nil:
+		return openAndReport(cmd.Context(), herdr, cfg, *selection.Namespace)
+	case selection.Temp != nil:
+		return openTempAndReport(cmd.Context(), herdr, cfg, *selection.Temp)
+	case selection.NewTemp:
+		return createTempFromSelection(cmd.Context(), herdr, cfg, root)
+	default:
+		return createFromSelection(cmd.Context(), herdr, cfg, root, selection.Repos)
 	}
-	return createFromSelection(cmd.Context(), herdr, cfg, root, chosen)
 }
 
-// ResolveSelection interprets a picker selection as one of the two verbs. It
-// returns the namespace to resume, or nil to mean "start a new namespace from
-// these repositories".
+// Selection is the verb a picker selection resolved to. Exactly one field is
+// set.
+type Selection struct {
+	// Namespace is the namespace to resume.
+	Namespace *Namespace
+	// Temp is the temp directory to resume.
+	Temp *Temp
+	// NewTemp asks for a fresh temp directory.
+	NewTemp bool
+	// Repos are the repositories to start a new namespace over.
+	Repos []RepoRef
+}
+
+// ResolveSelection interprets a picker selection as one of the verbs.
 //
-// The two verbs are not combinable: resuming needs exactly one namespace, and
-// starting needs only repositories.
-func ResolveSelection(chosen []Candidate) (*Namespace, error) {
+// Only repositories combine. Everything else is a single thing to open — one
+// namespace, one temp directory, or one new temp directory — so a selection
+// mixing them, or holding two of them, is a selection that does not name one
+// verb.
+func ResolveSelection(chosen []Candidate) (Selection, error) {
 	if len(chosen) == 0 {
-		return nil, errors.New("nothing selected")
+		return Selection{}, errors.New("nothing selected")
 	}
 
-	var namespaces []Candidate
+	repos := make([]RepoRef, 0, len(chosen))
 	for _, c := range chosen {
-		if c.Kind == CandidateNamespace {
-			namespaces = append(namespaces, c)
+		if c.Kind != CandidateRepo {
+			break
 		}
+		repos = append(repos, c.Repo)
 	}
-	if len(namespaces) == 0 {
-		return nil, nil
+	if len(repos) == len(chosen) {
+		return Selection{Repos: repos}, nil
 	}
-	if len(namespaces) != len(chosen) {
-		return nil, errors.New("select either one namespace to resume, or one or more repositories to start a new one")
+
+	if len(chosen) > 1 {
+		return Selection{}, errors.New("select either one namespace or temp directory to open, or one or more repositories to start a new namespace")
 	}
-	if len(namespaces) > 1 {
-		return nil, errors.New("select only one namespace to resume")
+
+	switch c := chosen[0]; c.Kind {
+	case CandidateNamespace:
+		return Selection{Namespace: &c.Namespace}, nil
+	case CandidateTemp:
+		return Selection{Temp: &c.Temp}, nil
+	case CandidateNewTemp:
+		return Selection{NewTemp: true}, nil
+	default:
+		return Selection{}, fmt.Errorf("unknown candidate kind %q", c.Kind)
 	}
-	return &namespaces[0].Namespace, nil
 }
 
 // createFromSelection prompts for a name and builds a namespace over the chosen
@@ -117,18 +149,27 @@ func ResolveSelection(chosen []Candidate) (*Namespace, error) {
 // The name is asked for after the repositories, which is what lets the branch
 // check run against them — and it keeps the one-repo case in the order it has
 // always been: pick the project, then name the work.
-func createFromSelection(ctx context.Context, herdr Herdr, cfg Config, root string, chosen []Candidate) error {
-	members := make([]RepoRef, 0, len(chosen))
-	for _, c := range chosen {
-		members = append(members, c.Repo)
-	}
-
+func createFromSelection(ctx context.Context, herdr Herdr, cfg Config, root string, members []RepoRef) error {
 	name := promptName()
 	ns, err := CreateNamespace(ctx, &DefaultExecutor{}, root, name, members)
 	if err != nil {
 		return err
 	}
 	return openAndReport(ctx, herdr, cfg, ns)
+}
+
+// createTempFromSelection makes a temp directory and opens it.
+//
+// The name is prompted for as a namespace's is, generated default and all, even
+// though nothing but the directory and the workspace label depends on it: a
+// directory called "jade-wyvern" is no help finding the one experiment you want
+// back, and the prompt is one Enter away from that same generated name anyway.
+func createTempFromSelection(ctx context.Context, herdr Herdr, cfg Config, root string) error {
+	t, err := CreateTemp(root, promptName())
+	if err != nil {
+		return err
+	}
+	return openTempAndReport(ctx, herdr, cfg, t)
 }
 
 // openAndReport opens a namespace and prints its path, which is what the picker
@@ -138,6 +179,15 @@ func openAndReport(ctx context.Context, herdr Herdr, cfg Config, ns Namespace) e
 		return err
 	}
 	fmt.Println(ns.Path)
+	return nil
+}
+
+// openTempAndReport opens a temp directory and prints its path.
+func openTempAndReport(ctx context.Context, herdr Herdr, cfg Config, t Temp) error {
+	if err := OpenTemp(ctx, herdr, cfg, t); err != nil {
+		return err
+	}
+	fmt.Println(t.Path)
 	return nil
 }
 

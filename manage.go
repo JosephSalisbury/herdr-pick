@@ -11,14 +11,16 @@ import (
 // switching only ever touches our own workspaces and never the user's other herdr
 // work.
 //
-// Every namespace lives under one root, so this is a single containment check.
-// Clones have their own root and are worktree sources rather than workspaces, so
-// they fall outside without needing to be excluded by name.
+// Everything openable lives under one of two roots, so this is two containment
+// checks. Deliberately not one check against <root> with the other roots
+// excluded: clones and caches are not workspaces, and naming what to skip is the
+// problem the layout was arranged to avoid.
 func OwnsPath(root, dir string) bool {
 	if dir == "" {
 		return false
 	}
-	return withinDir(NamespaceRoot(root), filepath.Clean(dir))
+	clean := filepath.Clean(dir)
+	return withinDir(NamespaceRoot(root), clean) || withinDir(TempRoot(root), clean)
 }
 
 // withinDir reports whether path is strictly inside dir, comparing whole path

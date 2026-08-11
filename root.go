@@ -102,15 +102,37 @@ func maybeRefresh(cfg Config, root string) error {
 	return nil
 }
 
+var listTemp bool
+
 var listCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List namespaces and their members, one per line",
 	Long: "Prints one line per namespace as `name<TAB>member,member`. Read-only " +
-		"and pipeable, and unlike status it does not need herdr to be running.",
+		"and pipeable, and unlike status it does not need herdr to be running. " +
+		"--temp lists temp directories instead, one name per line.",
 	RunE: func(_ *cobra.Command, _ []string) error {
 		_, root, err := loadConfig()
 		if err != nil {
 			return err
+		}
+
+		// A separate flag rather than more lines in the same output: this prints
+		// `name<TAB>member,member` and a temp directory has no members, so it has
+		// nothing to say in that shape. It is also the only way to enumerate temp
+		// directories for deletion, which nothing else does for you.
+		if listTemp {
+			temps, err := DiscoverTemps(root)
+			if err != nil {
+				return err
+			}
+			if len(temps) == 0 {
+				fmt.Fprintln(os.Stderr, "no temp directories")
+				return nil
+			}
+			for _, t := range temps {
+				fmt.Println(t.Name)
+			}
+			return nil
 		}
 
 		namespaces, err := DiscoverNamespaces(root)
@@ -220,6 +242,45 @@ var openCmd = &cobra.Command{
 	},
 }
 
+var tempCmd = &cobra.Command{
+	Use:   "temp [name]",
+	Short: "Open a temp directory with an agent in it",
+	Long: "Makes an empty directory under <root>/tmp, opens it as a herdr workspace " +
+		"and starts the agent in it — for trying something out that has no " +
+		"repositories yet. With no name, one is generated.",
+	Args: cobra.MaximumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, root, err := loadConfig()
+		if err != nil {
+			return err
+		}
+
+		name := GenerateName()
+		if len(args) == 1 {
+			name = args[0]
+		}
+
+		// Checked before the directory is made, so a dead socket leaves nothing
+		// behind.
+		herdr, err := connectHerdr(cmd.Context())
+		if err != nil {
+			return err
+		}
+
+		// An existing name resumes rather than failing, unlike `new`: a temp
+		// directory has no branch to collide with, so the only thing the name can
+		// already mean is the directory you asked for.
+		t, err := LoadTemp(root, name)
+		if err != nil {
+			if t, err = CreateTemp(root, name); err != nil {
+				return err
+			}
+		}
+		return openTempAndReport(cmd.Context(), herdr, cfg, t)
+	},
+}
+
 func init() {
-	rootCmd.AddCommand(listCmd, refreshCmd, newCmd, openCmd, pickCmd, pingCmd)
+	listCmd.Flags().BoolVar(&listTemp, "temp", false, "list temp directories instead of namespaces")
+	rootCmd.AddCommand(listCmd, refreshCmd, newCmd, openCmd, pickCmd, pingCmd, tempCmd)
 }

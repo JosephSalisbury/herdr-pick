@@ -32,24 +32,24 @@ func TestGenerateNameVariety(t *testing.T) {
 func TestGenerateNameIsAlwaysValid(t *testing.T) {
 	for range 200 {
 		name := GenerateName()
-		if err := ValidateBranchName(name); err != nil {
+		if err := ValidateName(name); err != nil {
 			t.Fatalf("generated name %q is invalid: %v", name, err)
 		}
 	}
 }
 
-func TestValidateBranchNameAccepts(t *testing.T) {
+func TestValidateNameAccepts(t *testing.T) {
 	for _, name := range []string{"swift-owlbear", "fix_thing", "v1.2.3", "abc123", "a"} {
-		if err := ValidateBranchName(name); err != nil {
+		if err := ValidateName(name); err != nil {
 			t.Fatalf("%q: unexpected error: %v", name, err)
 		}
 	}
 }
 
-func TestValidateBranchNameRejects(t *testing.T) {
+func TestValidateNameRejects(t *testing.T) {
 	// Slashes are rejected so a branch is always exactly one path segment.
 	for _, name := range []string{"", "feature/thing", "has space", "-leading", ".hidden", "a..b", "semi;colon", "quote'd", "../escape"} {
-		if err := ValidateBranchName(name); err == nil {
+		if err := ValidateName(name); err == nil {
 			t.Fatalf("expected error for %q", name)
 		}
 	}
